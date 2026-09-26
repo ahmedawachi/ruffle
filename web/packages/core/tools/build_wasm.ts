@@ -3,7 +3,9 @@ import { copyFileSync, mkdirSync, rmSync } from "fs";
 import * as process from "process";
 
 function runWasmOpt({ path, flags }: { path: string; flags?: string[] }) {
-    let args = ["-o", path, "-O", "-g", path];
+    // -O3 rather than wasm-opt's default "-O" (which is -Os, optimising for size):
+    // the interpreters' hot loops benefit from the speed-oriented pass pipeline.
+    let args = ["-o", path, process.env["WASM_OPT_LEVEL"] || "-O3", "-g", path];
     if (flags) {
         args = args.concat(flags);
     }
