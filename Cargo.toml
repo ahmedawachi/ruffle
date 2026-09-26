@@ -184,9 +184,13 @@ opt-level = 3
 # across "dual-wasm" builds, separating it for the two .wasm modules.
 [profile.web-wasm-mvp]
 inherits = "release"
+lto = true
+codegen-units = 1
 
 [profile.web-wasm-extensions]
 inherits = "release"
+lto = true
+codegen-units = 1
 
 [profile.ci]
 inherits = "release"
