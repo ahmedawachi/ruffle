@@ -313,17 +313,6 @@ pub enum ClipEvent<'gc> {
 }
 
 impl ClipEvent<'_> {
-    /// Method names for button event handles.
-    pub const BUTTON_EVENT_METHODS: [&'static str; 7] = [
-        "onDragOver",
-        "onDragOut",
-        "onPress",
-        "onRelease",
-        "onReleaseOutside",
-        "onRollOut",
-        "onRollOver",
-    ];
-
     pub const BUTTON_EVENT_FLAGS: ClipEventFlag = ClipEventFlag::from_bits_truncate(
         ClipEventFlag::DRAG_OUT.bits()
             | ClipEventFlag::DRAG_OVER.bits()

@@ -2324,19 +2324,26 @@ impl<'gc> MovieClip<'gc> {
         } else if self.avm1_parent().is_none() {
             false
         } else if let Some(object) = self.0.object1.get() {
+            // Interned names: this runs for every mouse-enabled clip on every mouse pick
+            // (at least once per frame), so it must not allocate new strings each time.
+            let handlers = [
+                istr!(context, "onDragOver"),
+                istr!(context, "onDragOut"),
+                istr!(context, "onPress"),
+                istr!(context, "onRelease"),
+                istr!(context, "onReleaseOutside"),
+                istr!(context, "onRollOut"),
+                istr!(context, "onRollOver"),
+            ];
             let mut activation = Avm1Activation::from_nothing(
                 context,
                 ActivationIdentifier::root("[Mouse Pick]"),
                 self.avm1_root(),
             );
 
-            ClipEvent::BUTTON_EVENT_METHODS
-                .iter()
-                .copied()
-                .any(|handler| {
-                    let handler = AvmString::new_utf8(activation.gc(), handler);
-                    object.has_property(&mut activation, handler)
-                })
+            handlers
+                .into_iter()
+                .any(|handler| object.has_property(&mut activation, handler))
         } else {
             false
         }
