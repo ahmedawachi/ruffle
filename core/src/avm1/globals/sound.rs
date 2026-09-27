@@ -20,6 +20,7 @@ use crate::backend::navigator::Request;
 use crate::character::Character;
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, SoundTransform, TDisplayObject};
+use crate::library::MovieLibraryRef;
 use crate::string::AvmString;
 use crate::{avm_warn, avm1_stub};
 
@@ -117,6 +118,12 @@ struct SoundData<'gc> {
     /// The sound that is attached to this object.
     sound: Cell<Option<SoundHandle>>,
 
+    /// The library of the movie that defined the attached sound.
+    ///
+    /// The sound is only registered with the audio backend while its library is alive,
+    /// and this object can play it for as long as it exists.
+    library: Lock<Option<MovieLibraryRef<'gc>>>,
+
     /// The instance of the last played sound on this object.
     sound_instance: Cell<Option<SoundInstanceHandle>>,
 
@@ -156,6 +163,7 @@ impl<'gc> Sound<'gc> {
             mc,
             SoundData {
                 sound: Cell::new(None),
+                library: Lock::new(None),
                 sound_instance: Cell::new(None),
                 target,
                 position: Cell::new(0),
@@ -177,13 +185,19 @@ impl<'gc> Sound<'gc> {
         self.0.sound.get()
     }
 
+    /// Attaches a sound to this object.
+    ///
+    /// `library` is the library of the movie that defined the sound, if any: it is kept
+    /// alive with this object, which keeps the sound registered.
     pub fn set_sound(
         self,
         activation: &mut Activation<'_, 'gc>,
         sound_object: Object<'gc>,
         sound: Option<SoundHandle>,
+        library: Option<MovieLibraryRef<'gc>>,
     ) {
         self.0.sound.set(sound);
+        unlock!(Gc::write(activation.gc(), self.0), SoundData, library).set(library);
 
         // `position` and `duration` are only defined when a sound is loaded.
         if !sound_object.has_property(activation, istr!("position"))
@@ -458,13 +472,17 @@ fn attach_sound<'gc>(
             return Ok(Value::Undefined);
         };
 
+        let library = activation
+            .context
+            .library
+            .library_ref(movie, activation.context.gc_context);
         let character = activation
             .context
             .library
-            .library_for_movie_mut(movie, activation.context.gc_context)
+            .get(library)
             .character_by_export_name(&name);
         if let Some((_, Character::Sound(sound_handle))) = character {
-            sound.set_sound(activation, this, Some(sound_handle));
+            sound.set_sound(activation, this, Some(sound_handle), Some(library));
             sound.set_duration(
                 activation
                     .context

@@ -3954,8 +3954,7 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let sound = reader.read_define_sound()?;
         if let Ok(handle) = context.audio.register_sound(&sound) {
-            self.library_mut(context)
-                .register_character(sound.id, Character::Sound(handle));
+            self.library_mut(context).register_sound(sound.id, handle);
         } else {
             tracing::error!(
                 "MovieClip::define_sound: Unable to register sound ID {}",
@@ -4051,14 +4050,11 @@ impl<'gc, 'a> MovieClipShared<'gc> {
 
     #[inline]
     fn import_exports_of_importer(&self, context: &mut UpdateContext<'gc>) {
-        let Some(importer_library) = self.importer_movie.and_then(|mc| {
-            context
-                .library
-                .library_for_movie(mc.movie(), context.gc_context)
-        }) else {
+        let Some(importer_library_ref) = self.importer_movie.map(|mc| mc.library()) else {
             return;
         };
 
+        let importer_library = context.library.get(importer_library_ref);
         let exported_from_importer = importer_library
             .export_characters()
             .iter()
@@ -4072,7 +4068,7 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         let mut self_library = self.library_mut(context);
         for (name, (id, character)) in exported_from_importer {
             if self_library.character_by_id(id).is_none() {
-                self_library.register_character(id, character);
+                self_library.register_linked_character(id, character, importer_library_ref);
                 self_library.register_export(id, name);
             }
         }
@@ -4138,7 +4134,7 @@ impl<'gc, 'a> MovieClipShared<'gc> {
                         .library_for_movie_mut(parent.clone(), context.gc_context);
 
                     if let Some(id) = parent_library.character_id_by_import_name(&name) {
-                        parent_library.register_character(id, character);
+                        parent_library.register_linked_character(id, character, self.library);
                         drop(parent_library);
 
                         Self::register_export(context, id, name, parent.clone());

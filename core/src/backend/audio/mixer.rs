@@ -556,6 +556,14 @@ impl AudioMixer {
         Err(decoders::Error::UnhandledCompression(AudioCompression::Mp3))
     }
 
+    /// Releases a registered sound, freeing its data.
+    ///
+    /// Playing instances of the sound hold their own reference to the data, so they
+    /// play on.
+    pub fn unregister_sound(&mut self, sound: SoundHandle) {
+        self.sounds.remove(sound);
+    }
+
     /// Starts a timeline audio stream.
     pub fn start_stream(
         &mut self,
@@ -583,7 +591,10 @@ impl AudioMixer {
         sound_handle: SoundHandle,
         settings: &swf::SoundInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        let sound = &self.sounds[sound_handle];
+        let sound = self
+            .sounds
+            .get(sound_handle)
+            .ok_or(DecodeError::UnregisteredSound)?;
         let data = Cursor::new(ArcAsRef(Arc::clone(&sound.data)));
         // Create a stream that decodes and resamples the sound.
         let stream = if sound.skip_sample_frames == 0
@@ -1084,6 +1095,11 @@ macro_rules! impl_audio_mixer_backend {
         }
 
         #[inline]
+        fn unregister_sound(&mut self, sound: SoundHandle) {
+            self.$mixer.unregister_sound(sound)
+        }
+
+        #[inline]
         fn start_stream(
             &mut self,
             clip_data: $crate::tag_utils::SwfSlice,
@@ -1168,4 +1184,55 @@ macro_rules! impl_audio_mixer_backend {
             self.$mixer.get_sample_history()
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simple_sound_info() -> swf::SoundInfo {
+        swf::SoundInfo {
+            event: swf::SoundEvent::Start,
+            in_sample: None,
+            out_sample: None,
+            num_loops: 1,
+            envelope: None,
+        }
+    }
+
+    #[test]
+    fn unregistered_sound_plays_on_and_cannot_be_started() {
+        let mut mixer = AudioMixer::new(2, 44100);
+        // One second of mono, 16-bit, uncompressed audio at full amplitude.
+        let data: Vec<u8> = (0..44100).flat_map(|_| i16::MAX.to_le_bytes()).collect();
+        let sound = mixer
+            .register_sound(&swf::Sound {
+                id: 1,
+                format: swf::SoundFormat {
+                    compression: AudioCompression::Uncompressed,
+                    sample_rate: 44100,
+                    is_stereo: false,
+                    is_16_bit: true,
+                },
+                num_samples: 44100,
+                data: &data,
+            })
+            .expect("the sound should register");
+        let instance = mixer
+            .start_sound(sound, &simple_sound_info())
+            .expect("a registered sound should start");
+
+        mixer.unregister_sound(sound);
+        assert!(mixer.get_sound_duration(sound).is_none());
+        assert!(matches!(
+            mixer.start_sound(sound, &simple_sound_info()),
+            Err(DecodeError::UnregisteredSound)
+        ));
+
+        // The instance that was already playing holds its own reference to the data.
+        let mut output = [0i16; 2 * 1024];
+        mixer.mix(&mut output);
+        assert!(output.iter().any(|&sample| sample != 0));
+        assert!(mixer.get_sound_position(instance).is_some());
+    }
 }

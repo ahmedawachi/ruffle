@@ -43,6 +43,9 @@ pub enum Error {
 
     #[error("Too many sounds are playing")]
     TooManySounds,
+
+    #[error("The sound is not registered")]
+    UnregisteredSound,
 }
 
 /// An audio decoder. Can be used as an `Iterator` to return stereo sample frames.

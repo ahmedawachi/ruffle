@@ -43,7 +43,7 @@ use crate::font::DefaultFont;
 use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
 use crate::input::InputEvent;
 use crate::input::InputManager;
-use crate::library::Library;
+use crate::library::{Library, ReleasedSounds};
 use crate::limits::ExecutionLimit;
 use crate::loader::{LoadBehavior, LoadManager};
 use crate::local_connection::LocalConnections;
@@ -349,6 +349,9 @@ pub struct Player {
     rng: AvmRng,
 
     gc_arena: Rc<RefCell<GcArena>>,
+
+    /// The sounds of freed movie libraries, to be released from the audio backend.
+    released_sounds: ReleasedSounds,
 
     frame_rate: f64,
     forced_frame_rate: bool,
@@ -2443,8 +2446,17 @@ impl Player {
 
         // GC
         self.gc_arena.borrow_mut().collect_debt();
+        self.release_freed_sounds();
 
         rval
+    }
+
+    /// Releases the sounds of the movie libraries that the garbage collector freed from
+    /// the audio backend. Nothing can play them any more.
+    fn release_freed_sounds(&mut self) {
+        for sound in self.released_sounds.take() {
+            self.audio.unregister_sound(sound);
+        }
     }
 
     /// Runs a full garbage collection, freeing everything that is no longer reachable.
@@ -2452,13 +2464,16 @@ impl Player {
     /// The player collects garbage incrementally as it runs; this is meant for tests and
     /// memory diagnostics.
     pub fn collect_garbage(&mut self) {
-        let mut arena = self.gc_arena.borrow_mut();
-        // A cycle in progress may have marked objects that became unreachable later on,
-        // so finish it and then run a whole new one.
-        if arena.collection_phase() != CollectionPhase::Sleeping {
+        {
+            let mut arena = self.gc_arena.borrow_mut();
+            // A cycle in progress may have marked objects that became unreachable later on,
+            // so finish it and then run a whole new one.
+            if arena.collection_phase() != CollectionPhase::Sleeping {
+                arena.finish_cycle();
+            }
             arena.finish_cycle();
         }
-        arena.finish_cycle();
+        self.release_freed_sounds();
     }
 
     pub fn flush_shared_objects(&mut self) {
@@ -2982,6 +2997,7 @@ impl PlayerBuilder {
         fake_movie: Arc<SwfMovie>,
         external_interface_provider: Option<Box<dyn ExternalInterfaceProvider>>,
         fs_command_provider: Box<dyn FsCommandProvider>,
+        released_sounds: ReleasedSounds,
     ) -> GcRoot<'gc> {
         let mut interner = AvmStringInterner::new(gc_context);
         let (avm1, avm2) = {
@@ -3007,7 +3023,7 @@ impl PlayerBuilder {
                 external_interface_provider,
                 fs_command_provider,
             ),
-            library: Library::empty(),
+            library: Library::empty(released_sounds),
             load_manager: LoadManager::new(),
             mouse_data: MouseData {
                 custom_cursors: FnvHashSet::default(),
@@ -3079,6 +3095,7 @@ impl PlayerBuilder {
         let fake_movie = Arc::new(SwfMovie::empty(player_version, None));
         let frame_rate = self.frame_rate.unwrap_or(12.0);
         let forced_frame_rate = self.frame_rate.is_some();
+        let released_sounds = ReleasedSounds::default();
         let player = Arc::new_cyclic(|self_ref| {
             Mutex::new(Player {
                 // Backends
@@ -3150,8 +3167,10 @@ impl PlayerBuilder {
                         fake_movie.clone(),
                         self.external_interface_provider,
                         self.fs_command_provider,
+                        released_sounds.clone(),
                     )
                 }))),
+                released_sounds,
             })
         });
 

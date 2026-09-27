@@ -21,9 +21,37 @@ use ruffle_wstr::{WStr, WString};
 use crate::backend::ui::{FontDefinition, UiBackend};
 use crate::font::DefaultFont;
 use fnv::{FnvHashMap, FnvHashSet};
-use std::cell::{Ref, RefMut};
+use std::cell::{Cell, Ref, RefMut};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
+
+/// Sounds that were registered with the audio backend by movie libraries that have
+/// since been freed. Nothing can play them any more; the player releases them from
+/// the audio backend after collecting garbage.
+pub type ReleasedSounds = Rc<Cell<Vec<SoundHandle>>>;
+
+/// The sounds that a movie library defined and registered with the audio backend.
+///
+/// They are handed over to be released when the library is freed. A library is only
+/// freed once nothing can use it any more (see `MovieLibraryRef`), and everything that
+/// can play one of its sounds keeps it alive: its display objects, the AVM1 `Sound`
+/// objects that attached one of its sounds, the AVM2 classes linked to them, and the
+/// libraries that imported them.
+struct OwnedSounds {
+    handles: Vec<SoundHandle>,
+    released: ReleasedSounds,
+}
+
+impl Drop for OwnedSounds {
+    fn drop(&mut self) {
+        if !self.handles.is_empty() {
+            let mut released = self.released.take();
+            released.append(&mut self.handles);
+            self.released.set(released);
+        }
+    }
+}
 
 /// A strong reference to the symbol library of a single movie.
 ///
@@ -59,12 +87,12 @@ impl fmt::Debug for MovieLibraryRef<'_> {
 }
 
 impl<'gc> MovieLibraryRef<'gc> {
-    fn new(movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> Self {
+    fn new(movie: Arc<SwfMovie>, released_sounds: ReleasedSounds, mc: &Mutation<'gc>) -> Self {
         let this = Self(Gc::new(
             mc,
             MovieLibraryCell {
                 movie: movie.clone(),
-                library: RefLock::new(MovieLibrary::new(movie)),
+                library: RefLock::new(MovieLibrary::new(movie, released_sounds)),
             },
         ));
         // `Bitmap`s instantiated from the library hold it, so it needs to know itself.
@@ -104,10 +132,16 @@ pub struct MovieLibrary<'gc> {
     avm2_domain: Option<Avm2Domain<'gc>>,
     /// The reference that owns this library; set as soon as it is created.
     this: Option<MovieLibraryRef<'gc>>,
+    /// The sounds this library defined, released from the audio backend when it is freed.
+    #[collect(require_static)]
+    sounds: OwnedSounds,
+    /// The libraries of other movies that own sounds this library shares (see
+    /// `register_linked_character`), kept alive for as long as this one.
+    linked_libraries: Vec<MovieLibraryRef<'gc>>,
 }
 
 impl<'gc> MovieLibrary<'gc> {
-    fn new(swf: Arc<SwfMovie>) -> Self {
+    fn new(swf: Arc<SwfMovie>, released_sounds: ReleasedSounds) -> Self {
         Self {
             swf,
             characters: HashMap::new(),
@@ -117,6 +151,11 @@ impl<'gc> MovieLibrary<'gc> {
             fonts: Default::default(),
             avm2_domain: None,
             this: None,
+            sounds: OwnedSounds {
+                handles: Vec::new(),
+                released: released_sounds,
+            },
+            linked_libraries: Vec::new(),
         }
     }
 
@@ -142,6 +181,47 @@ impl<'gc> MovieLibrary<'gc> {
                 tracing::error!("Character ID collision: Tried to register ID {} twice", id);
                 false
             }
+        }
+    }
+
+    /// Registers a sound that this library's movie defined, which was registered with
+    /// the audio backend as `handle`.
+    ///
+    /// The library owns the sound: it is released from the audio backend once the
+    /// library is freed.
+    pub fn register_sound(&mut self, id: CharacterId, handle: SoundHandle) -> bool {
+        self.sounds.handles.push(handle);
+        self.register_character(id, Character::Sound(handle))
+    }
+
+    /// Registers a character of another movie's library (shared by `ImportAssets`).
+    ///
+    /// A sound belongs to the library that defined it, so that library is kept alive
+    /// for as long as this one: this library can still play the sound. The other kinds
+    /// of characters don't need that: they either keep their library alive themselves
+    /// or don't depend on it.
+    pub fn register_linked_character(
+        &mut self,
+        id: CharacterId,
+        character: Character<'gc>,
+        from: MovieLibraryRef<'gc>,
+    ) -> bool {
+        if matches!(character, Character::Sound(_)) {
+            self.link_library(from);
+        }
+        self.register_character(id, character)
+    }
+
+    fn link_library(&mut self, library: MovieLibraryRef<'gc>) {
+        let is_self = self
+            .this
+            .is_some_and(|this| MovieLibraryRef::ptr_eq(this, library));
+        let is_linked = self
+            .linked_libraries
+            .iter()
+            .any(|&linked| MovieLibraryRef::ptr_eq(linked, library));
+        if !is_self && !is_linked {
+            self.linked_libraries.push(library);
         }
     }
 
@@ -389,24 +469,31 @@ impl ruffle_render::bitmap::BitmapSource for MovieLibrarySource<'_, '_> {
 /// A library holds its movie until it is dropped, so while an entry has not been
 /// dropped, no other movie can have its address. Entries of dropped libraries are
 /// pruned before inserting.
-struct MovieLibraries<'gc>(FnvHashMap<*const SwfMovie, GcWeak<'gc, MovieLibraryCell<'gc>>>);
+struct MovieLibraries<'gc> {
+    libraries: FnvHashMap<*const SwfMovie, GcWeak<'gc, MovieLibraryCell<'gc>>>,
+    /// Where freed libraries hand over the sounds they registered.
+    released_sounds: ReleasedSounds,
+}
 
 unsafe impl<'gc> Collect<'gc> for MovieLibraries<'gc> {
     #[inline]
     fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for library in self.0.values() {
+        for library in self.libraries.values() {
             cc.trace(library);
         }
     }
 }
 
 impl<'gc> MovieLibraries<'gc> {
-    fn new() -> Self {
-        Self(FnvHashMap::default())
+    fn new(released_sounds: ReleasedSounds) -> Self {
+        Self {
+            libraries: FnvHashMap::default(),
+            released_sounds,
+        }
     }
 
     fn get(&self, movie: &Arc<SwfMovie>, mc: &Mutation<'gc>) -> Option<MovieLibraryRef<'gc>> {
-        let library = MovieLibraryRef(self.0.get(&Arc::as_ptr(movie))?.upgrade(mc)?);
+        let library = MovieLibraryRef(self.libraries.get(&Arc::as_ptr(movie))?.upgrade(mc)?);
         debug_assert!(Arc::ptr_eq(&library.0.movie, movie));
         Some(library)
     }
@@ -415,15 +502,15 @@ impl<'gc> MovieLibraries<'gc> {
         if let Some(library) = self.get(&movie, mc) {
             return library;
         }
-        self.0.retain(|_, library| !library.is_dropped());
-        let library = MovieLibraryRef::new(movie, mc);
-        self.0
+        self.libraries.retain(|_, library| !library.is_dropped());
+        let library = MovieLibraryRef::new(movie, self.released_sounds.clone(), mc);
+        self.libraries
             .insert(Arc::as_ptr(&library.0.movie), Gc::downgrade(library.0));
         library
     }
 
     fn live(&self, mc: &Mutation<'gc>) -> impl Iterator<Item = MovieLibraryRef<'gc>> {
-        self.0
+        self.libraries
             .values()
             .filter_map(move |library| library.upgrade(mc).map(MovieLibraryRef))
     }
@@ -463,9 +550,11 @@ pub struct Library<'gc> {
 }
 
 impl<'gc> Library<'gc> {
-    pub fn empty() -> Self {
+    /// Creates an empty library. Freed movie libraries hand the sounds they registered
+    /// with the audio backend over to `released_sounds`.
+    pub fn empty(released_sounds: ReleasedSounds) -> Self {
         Self {
-            movie_libraries: MovieLibraries::new(),
+            movie_libraries: MovieLibraries::new(released_sounds),
             root_library: None,
             device_fonts: Default::default(),
             global_fonts: Default::default(),
@@ -906,5 +995,100 @@ impl<'gc> FontMap<'gc> {
 
     pub fn iter_all(&self) -> impl Iterator<Item = Font<'gc>> {
         self.0.values().copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::UpdateContext;
+    use crate::player::PlayerBuilder;
+
+    /// Registers a sound defined by `library`'s movie, as a `DefineSound` tag does.
+    fn define_sound<'gc>(
+        context: &mut UpdateContext<'gc>,
+        library: MovieLibraryRef<'gc>,
+        id: CharacterId,
+    ) -> SoundHandle {
+        let data = [0u8; 16];
+        let handle = context
+            .audio
+            .register_sound(&swf::Sound {
+                id,
+                format: swf::SoundFormat {
+                    compression: swf::AudioCompression::Uncompressed,
+                    sample_rate: 44100,
+                    is_stereo: false,
+                    is_16_bit: false,
+                },
+                num_samples: 16,
+                data: &data,
+            })
+            .expect("the sound should register");
+        context
+            .library
+            .get_mut(library, context.gc_context)
+            .register_sound(id, handle);
+        handle
+    }
+
+    #[test]
+    fn sounds_are_released_with_their_library() {
+        let player = PlayerBuilder::new().build();
+        let mut player = player.lock().unwrap();
+        let root = Arc::new(SwfMovie::empty(8, None));
+        let other = Arc::new(SwfMovie::empty(8, None));
+
+        let (kept, released) = player.mutate_with_update_context(|context| {
+            context
+                .library
+                .set_root_movie(root.clone(), context.gc_context);
+            let root_library = context.library.library_ref(root, context.gc_context);
+            let other_library = context.library.library_ref(other, context.gc_context);
+            (
+                define_sound(context, root_library, 1),
+                define_sound(context, other_library, 1),
+            )
+        });
+        player.collect_garbage();
+
+        // The player keeps the library of the root movie alive; nothing keeps the other one.
+        assert!(player.audio().get_sound_duration(kept).is_some());
+        assert!(player.audio().get_sound_duration(released).is_none());
+    }
+
+    #[test]
+    fn imported_sounds_keep_their_library_alive() {
+        let player = PlayerBuilder::new().build();
+        let mut player = player.lock().unwrap();
+        let importer = Arc::new(SwfMovie::empty(8, None));
+        let exporter = Arc::new(SwfMovie::empty(8, None));
+
+        let sound = player.mutate_with_update_context(|context| {
+            context
+                .library
+                .set_root_movie(importer.clone(), context.gc_context);
+            let importer_library = context.library.library_ref(importer, context.gc_context);
+            let exporter_library = context.library.library_ref(exporter, context.gc_context);
+            let sound = define_sound(context, exporter_library, 1);
+            context
+                .library
+                .get_mut(importer_library, context.gc_context)
+                .register_linked_character(2, Character::Sound(sound), exporter_library);
+            sound
+        });
+        player.collect_garbage();
+
+        // Only the importer's library is held, and it can still play the exporter's sound.
+        assert!(player.audio().get_sound_duration(sound).is_some());
+
+        let replacement = Arc::new(SwfMovie::empty(8, None));
+        player.mutate_with_update_context(|context| {
+            context
+                .library
+                .set_root_movie(replacement, context.gc_context);
+        });
+        player.collect_garbage();
+        assert!(player.audio().get_sound_duration(sound).is_none());
     }
 }
