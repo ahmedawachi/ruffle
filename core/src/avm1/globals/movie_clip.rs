@@ -294,13 +294,12 @@ fn attach_bitmap<'gc>(
             .as_bool(activation.swf_version());
 
         //TODO: do attached BitmapDatas have character ids?
-        let display_object = Bitmap::new_with_bitmap_data(
-            activation.gc(),
-            0,
-            bitmap_data,
-            smoothing,
-            &movie_clip.movie(),
-        );
+        let library = activation
+            .context
+            .library
+            .library_ref(movie_clip.movie(), activation.context.gc_context);
+        let display_object =
+            Bitmap::new_with_bitmap_data(activation.gc(), 0, bitmap_data, smoothing, library);
         movie_clip.replace_at_depth(activation.context, display_object.into(), depth);
         display_object.post_instantiation(activation.context, None, Instantiator::Avm1, true);
     }
@@ -797,7 +796,7 @@ fn attach_movie<'gc>(
     if let Some(new_clip) = activation
         .context
         .library
-        .library_for_movie(movie_clip.movie())
+        .library_for_movie(movie_clip.movie(), activation.gc())
         .and_then(|l| l.instantiate_by_export_name(&export_name, activation.gc()))
     {
         new_clip.set_placed_by_avm1_script(true);
@@ -840,8 +839,11 @@ fn create_empty_movie_clip<'gc>(
     };
 
     // Create empty movie clip.
-    let swf_movie = movie_clip.movie();
-    let new_clip = MovieClip::new(swf_movie, activation.gc());
+    let library = activation
+        .context
+        .library
+        .library_ref(movie_clip.movie(), activation.context.gc_context);
+    let new_clip = MovieClip::new(library, activation.gc());
     new_clip.set_placed_by_avm1_script(true);
 
     // Set name and attach to parent.
@@ -981,13 +983,17 @@ pub fn clone_sprite<'gc>(
     #[allow(clippy::question_mark)]
     let cloned_sprite = if sprite.id() != 0 {
         // Clip from SWF; instantiate a new copy.
-        let library = context.library.library_for_movie(movie).unwrap();
+        let library = context
+            .library
+            .library_for_movie(movie, context.gc_context)
+            .unwrap();
         library
             .instantiate_by_id(sprite.id(), context.gc())
             .unwrap()
     } else if sprite.as_movie_clip().is_some() {
         // Dynamically created MovieClip; create a new empty movie clip.
-        MovieClip::new(movie, context.gc()).as_displayobject()
+        let library = context.library.library_ref(movie, context.gc_context);
+        MovieClip::new(library, context.gc()).as_displayobject()
     } else if let Some(et) = sprite.as_edit_text() {
         // Dynamically created TextField; create a new text field.
         EditText::new(

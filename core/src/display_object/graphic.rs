@@ -6,7 +6,7 @@ use crate::avm2::{
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{BoundsMode, DisplayObjectBase};
 use crate::drawing::Drawing;
-use crate::library::MovieLibrarySource;
+use crate::library::{MovieLibraryRef, MovieLibrarySource};
 use crate::prelude::*;
 use crate::scale9_cache::{Scale9Cache, Scale9Key};
 use crate::tag_utils::SwfMovie;
@@ -41,6 +41,8 @@ impl fmt::Debug for Graphic<'_> {
 pub struct GraphicData<'gc> {
     base: DisplayObjectBase<'gc>,
     shared: Lock<Gc<'gc, GraphicShared>>,
+    /// The library of the shape's movie, kept alive by this instance.
+    library: Lock<MovieLibraryRef<'gc>>,
     class: Lock<Option<Avm2ClassObject<'gc>>>,
     avm2_object: Lock<Option<Avm2StageObject<'gc>>>,
     /// This is lazily allocated on demand, to make `GraphicData` smaller in the common case.
@@ -59,26 +61,30 @@ impl<'gc> Graphic<'gc> {
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
-        let library = context.library.library_for_movie(movie.clone()).unwrap();
+        let library_ref = context
+            .library
+            .library_ref(movie.clone(), context.gc_context);
+        let library = context.library.get(library_ref);
         let shared = GraphicShared {
             id: swf_shape.id,
             shape_bounds: swf_shape.shape_bounds,
             edge_bounds: swf_shape.edge_bounds,
-            render_handle: Some(
-                context
-                    .renderer
-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
-            ),
+            render_handle: Some(context.renderer.register_shape(
+                (&swf_shape).into(),
+                &MovieLibrarySource { library: &library },
+            )),
             shape: swf_shape,
             movie,
             scaled_handle: RefCell::new(TessellationCache::new()),
         };
+        drop(library);
 
         Graphic(Gc::new(
             context.gc(),
             GraphicData {
                 base: Default::default(),
                 shared: Lock::new(Gc::new(context.gc(), shared)),
+                library: Lock::new(library_ref),
                 class: Lock::new(None),
                 avm2_object: Lock::new(None),
                 drawing: OnceCell::new(),
@@ -89,6 +95,9 @@ impl<'gc> Graphic<'gc> {
 
     /// Construct an empty `Graphic`.
     pub fn empty(context: &mut UpdateContext<'gc>) -> Self {
+        let library = context
+            .library
+            .library_ref(context.root_swf.clone(), context.gc_context);
         let shared = GraphicShared {
             id: 0,
             shape_bounds: Default::default(),
@@ -115,6 +124,7 @@ impl<'gc> Graphic<'gc> {
             GraphicData {
                 base: Default::default(),
                 shared: Lock::new(Gc::new(context.gc(), shared)),
+                library: Lock::new(library),
                 class: Lock::new(None),
                 avm2_object: Lock::new(None),
                 drawing: OnceCell::new(),
@@ -135,8 +145,11 @@ impl<'gc> Graphic<'gc> {
         unlock!(Gc::write(mc, self.0), GraphicData, class).set(Some(class));
     }
 
-    fn set_shared(self, mc: &Mutation<'gc>, shared: Gc<'gc, GraphicShared>) {
-        unlock!(Gc::write(mc, self.0), GraphicData, shared).set(shared);
+    /// Makes this instance display the art of `other`, a character of the library.
+    fn set_shared(self, mc: &Mutation<'gc>, other: Graphic<'gc>) {
+        let write = Gc::write(mc, self.0);
+        unlock!(write, GraphicData, shared).set(other.0.shared.get());
+        unlock!(write, GraphicData, library).set(other.0.library.get());
     }
 
     /// Tessellation of the library shape 9-sliced against `scale9`, cached per instance
@@ -151,11 +164,13 @@ impl<'gc> Graphic<'gc> {
         let key = Scale9Key::new(scale9, space).with_tessellation_scale(world_scale);
         self.0.scale9_cache.get_or_register(key, || {
             let shared = self.0.shared.get();
-            let library = context.library.library_for_movie(shared.movie.clone())?;
+            let library = context
+                .library
+                .library_for_movie(shared.movie.clone(), context.gc_context)?;
             let distilled: DistilledShape = (&shared.shape).into();
             Some(context.renderer.register_shape_with_scale(
                 scale9.apply(distilled, space),
-                &MovieLibrarySource { library },
+                &MovieLibrarySource { library: &library },
                 world_scale,
             ))
         })
@@ -181,11 +196,13 @@ impl<'gc> Graphic<'gc> {
         }
 
         // Retessellate at the new scale
-        let library = context.library.library_for_movie(shared.movie.clone());
+        let library = context
+            .library
+            .library_for_movie(shared.movie.clone(), context.gc_context);
         if let Some(library) = library {
             let new_handle = context.renderer.register_shape_with_scale(
                 (&shared.shape).into(),
-                &MovieLibrarySource { library },
+                &MovieLibrarySource { library: &library },
                 current_scale,
             );
 
@@ -261,12 +278,12 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     fn replace_with(self, context: &mut UpdateContext<'gc>, id: CharacterId) {
         // Static assets like Graphics can replace themselves via a PlaceObject tag with PlaceObjectAction::Replace.
         // This does not create a new instance, but instead swaps out the underlying static data to point to the new art.
-        if let Some(new_graphic) = context
+        let new_graphic = context
             .library
-            .library_for_movie_mut(self.movie())
-            .get_graphic(id)
-        {
-            self.set_shared(context.gc(), new_graphic.0.shared.get());
+            .library_for_movie_mut(self.movie(), context.gc_context)
+            .get_graphic(id);
+        if let Some(new_graphic) = new_graphic {
+            self.set_shared(context.gc(), new_graphic);
             // The cache key holds no character id, so entries built for the old shape would
             // still match.
             self.0.scale9_cache.clear();

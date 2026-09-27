@@ -28,18 +28,13 @@ pub fn init<'gc>(
     if let Some(sound_object) = this.as_object().and_then(|o| o.as_sound_object()) {
         let class_def = this.instance_class(activation);
 
-        if let Some((movie, symbol)) = activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(class_def)
-        {
-            if let Some(Character::Sound(sound)) = activation
+        if let Some((library, symbol)) = class_def.symbol_class() {
+            let character = activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
-                .character_by_id(symbol)
-            {
+                .get(library)
+                .character_by_id(symbol);
+            if let Some(Character::Sound(sound)) = character {
                 sound_object.set_sound(activation.context, sound);
             } else {
                 tracing::warn!(

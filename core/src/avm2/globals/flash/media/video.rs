@@ -16,21 +16,19 @@ pub fn video_allocator<'gc>(
     let mut target_class = Some(class.inner_class_definition());
     while let Some(target) = target_class {
         if target == video_class {
-            let movie = activation.caller_movie_or_root();
-            let new_do = Video::new(activation.gc(), movie, 0, 0, None);
+            let library = activation.context.library.library_ref(
+                activation.caller_movie_or_root(),
+                activation.context.gc_context,
+            );
+            let new_do = Video::new(activation.gc(), library, 0, 0, None);
             return Ok(initialize_for_allocator(activation.context, new_do.into(), class).into());
         }
 
-        if let Some((movie, symbol)) = activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(target)
-        {
+        if let Some((library, symbol)) = target.symbol_class() {
             let child = activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
+                .get(library)
                 .instantiate_by_id(symbol, activation.context.gc_context);
 
             if let Some(child) = child {

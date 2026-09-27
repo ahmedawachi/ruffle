@@ -1,0 +1,11 @@
+load 1: movieclip marker
+load 2: movieclip marker
+load 3: movieclip marker
+load 4: movieclip marker
+load 5: movieclip marker
+load 6: movieclip marker
+load 7: movieclip marker
+load 8: movieclip marker
+load 9: movieclip marker
+load 10: movieclip marker
+unloaded

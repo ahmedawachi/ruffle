@@ -458,12 +458,12 @@ fn attach_sound<'gc>(
             return Ok(Value::Undefined);
         };
 
-        if let Some((_, Character::Sound(sound_handle))) = activation
+        let character = activation
             .context
             .library
-            .library_for_movie_mut(movie)
-            .character_by_export_name(&name)
-        {
+            .library_for_movie_mut(movie, activation.context.gc_context)
+            .character_by_export_name(&name);
+        if let Some((_, Character::Sound(sound_handle))) = character {
             sound.set_sound(activation, this, Some(sound_handle));
             sound.set_duration(
                 activation
@@ -880,12 +880,12 @@ fn stop<'gc>(
                 return Ok(Value::Undefined);
             };
 
-            if let Some((_, Character::Sound(sound))) = activation
+            let character = activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
-                .character_by_export_name(&name)
-            {
+                .library_for_movie_mut(movie, activation.context.gc_context)
+                .character_by_export_name(&name);
+            if let Some((_, Character::Sound(sound))) = character {
                 // FIXME: This isn't entirely correct. We should only
                 // stop sounds with this name on this particular sound object;
                 // right now we're stopping *all* sound objects playing this sound.

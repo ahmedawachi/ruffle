@@ -2555,7 +2555,7 @@ pub trait TDisplayObject<'gc>:
             {
                 let domain = context
                     .library
-                    .library_for_movie(self.movie())
+                    .library_for_movie(self.movie(), context.gc_context)
                     .unwrap()
                     .avm2_domain();
 

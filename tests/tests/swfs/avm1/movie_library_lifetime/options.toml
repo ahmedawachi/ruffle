@@ -1,0 +1,17 @@
+# Run by the `movie_library_lifetime_avm1` test in `tests/tests/movie_library/mod.rs`,
+# which collects garbage after every tick. This file is not named `test.toml` so that
+# the regular test runner doesn't run it on its own.
+num_frames = 100
+
+[[compilers]]
+type = "Rascal"
+target = "test.swf"
+scripts = ["test.as"]
+swf_version = 8
+
+[[compilers]]
+type = "Rascal"
+target = "child.swf"
+scripts = ["child.as"]
+classes = ["Marker"]
+swf_version = 8

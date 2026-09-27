@@ -11,6 +11,7 @@ use crate::display_object::interactive::{
 };
 use crate::display_object::{Avm1TextFieldBinding, BoundsMode, DisplayObjectBase};
 use crate::events::{ClipEvent, ClipEventResult};
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::string::AvmString;
 use crate::tag_utils::{SwfMovie, SwfSlice};
@@ -46,6 +47,8 @@ pub struct Avm1ButtonData<'gc> {
     base: InteractiveObjectBase<'gc>,
     cell: RefLock<Avm1ButtonDataMut<'gc>>,
     shared: Gc<'gc, ButtonShared>,
+    /// The library of the button's movie, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
     object: Lock<Option<Object<'gc>>>,
     state: Cell<ButtonState>,
     tracking: Cell<ButtonTracking>,
@@ -63,7 +66,13 @@ struct Avm1ButtonDataMut<'gc> {
 }
 
 impl<'gc> Avm1Button<'gc> {
-    pub fn from_swf_tag(button: &swf::Button, source_movie: &SwfSlice, mc: &Mutation<'gc>) -> Self {
+    pub fn from_swf_tag(
+        button: &swf::Button,
+        source_movie: &SwfSlice,
+        library: MovieLibraryRef<'gc>,
+        mc: &Mutation<'gc>,
+    ) -> Self {
+        debug_assert!(Arc::ptr_eq(&source_movie.movie, &library.movie()));
         let actions = button
             .actions
             .iter()
@@ -98,6 +107,7 @@ impl<'gc> Avm1Button<'gc> {
                         }),
                     },
                 ),
+                library,
                 state: Cell::new(ButtonState::Up),
                 initialized: Cell::new(false),
                 object: Lock::new(None),
@@ -142,7 +152,6 @@ impl<'gc> Avm1Button<'gc> {
         let mut removed_depths: fnv::FnvHashSet<_> =
             self.iter_render_list().map(|o| o.depth()).collect();
 
-        let movie = self.movie();
         self.0.state.set(state);
 
         // Create any new children that exist in this state, and remove children
@@ -162,11 +171,11 @@ impl<'gc> Avm1Button<'gc> {
 
                     // Instantiate new child.
                     _ => {
-                        if let Some(child) = context
+                        let child = context
                             .library
-                            .library_for_movie_mut(movie.clone())
-                            .instantiate_by_id(record.id, context.gc_context)
-                        {
+                            .get(self.0.library)
+                            .instantiate_by_id(record.id, context.gc_context);
+                        if let Some(child) = child {
                             // New child that did not previously exist, create it.
                             child.set_parent(context, Some(self.into()));
                             child.set_depth(record.depth.into());
@@ -295,11 +304,11 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
 
             for record in &self.0.shared.cell.borrow().records {
                 if record.states.contains(swf::ButtonState::HIT_TEST) {
-                    match context
+                    let child = context
                         .library
-                        .library_for_movie_mut(self.0.movie())
-                        .instantiate_by_id(record.id, context.gc_context)
-                    {
+                        .get(self.0.library)
+                        .instantiate_by_id(record.id, context.gc_context);
+                    match child {
                         Some(child) => {
                             child.set_matrix(record.matrix.into());
                             child.set_parent(context, Some(self.into()));

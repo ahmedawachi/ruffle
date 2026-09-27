@@ -14,6 +14,7 @@ use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::vtable::VTable;
 use crate::avm2::{Avm2, Multiname, Namespace};
 use crate::context::UpdateContext;
+use crate::library::MovieLibraryRef;
 use crate::string::{AvmAtom, AvmString};
 use crate::tag_utils::SwfMovie;
 use gc_arena::barrier::field;
@@ -80,16 +81,24 @@ struct TranslationUnitData<'gc> {
 
     /// The movie that this TranslationUnit was loaded from.
     movie: Arc<SwfMovie>,
+
+    /// The library of `movie`, kept alive while the code of this unit can run.
+    ///
+    /// `None` for the player's builtin classes.
+    library: Option<MovieLibraryRef<'gc>>,
 }
 
 impl<'gc> TranslationUnit<'gc> {
     /// Construct a new `TranslationUnit` for a given ABC file intended to
     /// execute within a particular domain.
+    ///
+    /// `library` is the library of `movie`, or `None` for the player's builtin classes.
     pub fn from_abc(
         abc: AbcFile,
         domain: Domain<'gc>,
         name: Option<AvmString<'gc>>,
         movie: Arc<SwfMovie>,
+        library: Option<MovieLibraryRef<'gc>>,
         mc: &Mutation<'gc>,
     ) -> Self {
         use std::iter::repeat_n;
@@ -103,6 +112,7 @@ impl<'gc> TranslationUnit<'gc> {
             namespaces: repeat_n(OnceLock::new(), abc.constant_pool.namespaces.len() + 1).collect(),
             multinames: repeat_n(OnceLock::new(), abc.constant_pool.multinames.len() + 1).collect(),
             movie,
+            library,
             abc: Rc::new(abc),
         };
 

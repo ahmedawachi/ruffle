@@ -17,12 +17,14 @@ use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
 use crate::avm2::vtable::{VTable, VTableInitError};
 use crate::context::UpdateContext;
+use crate::library::MovieLibraryRef;
 use crate::string::{AvmString, WString};
 use bitflags::bitflags;
 use fnv::FnvHashMap;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::{OnceLock, RefLock};
 use gc_arena::{Collect, Gc, Lock, Mutation};
+use swf::CharacterId;
 use swf::avm2::types::Trait as AbcTrait;
 
 use std::cell::{Cell, Ref};
@@ -176,6 +178,12 @@ pub struct ClassData<'gc> {
     #[collect(require_static)]
     builtin_type: Cell<Option<BuiltinType>>,
 
+    /// The library symbol that a `SymbolClass` tag associated with this class.
+    ///
+    /// This keeps the library of the symbol's movie alive for as long as the
+    /// class exists, since constructing the class instantiates the symbol.
+    symbol_class: Lock<Option<(MovieLibraryRef<'gc>, CharacterId)>>,
+
     cell: RefLock<ClassDataMut<'gc>>,
 }
 
@@ -233,6 +241,7 @@ impl<'gc> ClassData<'gc> {
             custom_constructor: None,
             linked_class: Lock::new(ClassLink::Unlinked),
             builtin_type: Cell::new(None),
+            symbol_class: Lock::new(None),
             cell: RefLock::new(ClassDataMut {
                 applications: FnvHashMap::default(),
                 class_objects: Vec::new(),
@@ -244,6 +253,45 @@ impl<'gc> ClassData<'gc> {
 impl<'gc> Class<'gc> {
     pub fn as_ptr(self) -> *const () {
         Gc::as_ptr(self.0).cast()
+    }
+
+    /// Retrieve the library symbol associated with this class by a `SymbolClass` tag.
+    ///
+    /// A value of `None` indicates that this class is not associated with a
+    /// library symbol.
+    pub fn symbol_class(self) -> Option<(MovieLibraryRef<'gc>, CharacterId)> {
+        self.0.symbol_class.get()
+    }
+
+    /// Associate this class with a given library symbol.
+    pub fn set_symbol_class(
+        self,
+        mc: &Mutation<'gc>,
+        library: MovieLibraryRef<'gc>,
+        symbol: CharacterId,
+    ) {
+        if let Some((old_library, old_symbol)) = self.0.symbol_class.get() {
+            if MovieLibraryRef::ptr_eq(library, old_library) && symbol != old_symbol {
+                // Flash player actually allows using the same class in multiple SymbolClass
+                // entries in the same swf, with *different* symbol ids. Whichever one
+                // is processed first will *win*, and the second one will be ignored.
+                // We still log a warning, since we wouldn't expect this to happen outside
+                // of deliberately crafted SWFs.
+                tracing::warn!(
+                    "Tried to overwrite class {:?} id={:?} with symbol id={:?} from same movie",
+                    self,
+                    old_symbol,
+                    symbol,
+                );
+            }
+            // If we're trying to overwrite the class with a symbol from a *different* SwfMovie,
+            // then just ignore it. This handles the case where a Loader has a class that shadows
+            // a class in the main swf (possibly with a different ApplicationDomain). This will
+            // result in the original class from the parent being used, even when the child swf
+            // instantiates the clip on the timeline.
+            return;
+        }
+        unlock!(Gc::write(mc, self.0), ClassData, symbol_class).set(Some((library, symbol)));
     }
 
     /// Create an unlinked class from its name, superclass, and traits.

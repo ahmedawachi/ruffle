@@ -94,10 +94,12 @@ pub fn load<'gc>(
 
     // This is a dummy MovieClip, which will get overwritten in `Loader`
     let movie = &activation.context.root_swf;
-    let content = MovieClip::new(
-        Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into()))),
-        activation.gc(),
-    );
+    let empty_movie = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
+    let library = activation
+        .context
+        .library
+        .library_ref(empty_movie, activation.context.gc_context);
+    let content = MovieClip::new(library, activation.gc());
 
     // Update the LoaderStream - we still have a fake SwfMovie, but we now have the real target clip.
     loader_info.set_loader_stream(
@@ -267,10 +269,12 @@ pub fn load_bytes<'gc>(
 
     // This is a dummy MovieClip, which will get overwritten in `Loader`
     let movie = &activation.context.root_swf;
-    let content = MovieClip::new(
-        Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into()))),
-        activation.gc(),
-    );
+    let empty_movie = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
+    let library = activation
+        .context
+        .library
+        .library_ref(empty_movie, activation.context.gc_context);
+    let content = MovieClip::new(library, activation.gc());
 
     let default_domain = activation
         .caller_domain()

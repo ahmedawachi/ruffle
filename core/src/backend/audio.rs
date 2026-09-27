@@ -800,11 +800,11 @@ impl<'gc> AudioManager<'gc> {
         character_id: CharacterId,
         sound_info: &SoundInfo,
     ) {
-        if let Some(handle) = context
+        let handle = context
             .library
-            .library_for_movie_mut(display_object.movie())
-            .get_sound(character_id)
-        {
+            .library_for_movie_mut(display_object.movie(), context.gc_context)
+            .get_sound(character_id);
+        if let Some(handle) = handle {
             use swf::SoundEvent;
             // The sound event type is controlled by the "Sync" setting in the Flash IDE.
             match sound_info.event {

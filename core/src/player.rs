@@ -61,6 +61,7 @@ use crate::vminterface::Instantiator;
 use async_channel::Sender;
 use enumset::EnumSet;
 use fnv::FnvHashSet;
+use gc_arena::arena::CollectionPhase;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, DynamicRootSet, Mutation, Rootable};
 use ruffle_common::duration::FloatDuration;
@@ -2444,6 +2445,20 @@ impl Player {
         self.gc_arena.borrow_mut().collect_debt();
 
         rval
+    }
+
+    /// Runs a full garbage collection, freeing everything that is no longer reachable.
+    ///
+    /// The player collects garbage incrementally as it runs; this is meant for tests and
+    /// memory diagnostics.
+    pub fn collect_garbage(&mut self) {
+        let mut arena = self.gc_arena.borrow_mut();
+        // A cycle in progress may have marked objects that became unreachable later on,
+        // so finish it and then run a whole new one.
+        if arena.collection_phase() != CollectionPhase::Sleeping {
+            arena.finish_cycle();
+        }
+        arena.finish_cycle();
     }
 
     pub fn flush_shared_objects(&mut self) {

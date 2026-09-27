@@ -2,7 +2,7 @@ use crate::avm1::Object as Avm1Object;
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{BoundsMode, DisplayObjectBase};
-use crate::library::MovieLibrarySource;
+use crate::library::{MovieLibraryRef, MovieLibrarySource};
 use crate::prelude::*;
 use crate::scale9_cache::{Scale9Cache, Scale9Key};
 use crate::tag_utils::SwfMovie;
@@ -37,6 +37,8 @@ impl fmt::Debug for MorphShape<'_> {
 pub struct MorphShapeData<'gc> {
     base: DisplayObjectBase<'gc>,
     shared: Lock<Gc<'gc, MorphShapeShared>>,
+    /// The library of the shape's movie, kept alive by this instance.
+    library: Lock<MovieLibraryRef<'gc>>,
     /// The AVM2 representation of this MorphShape.
     object: Lock<Option<Avm2StageObject<'gc>>>,
 
@@ -58,12 +60,14 @@ impl<'gc> MorphShape<'gc> {
         let key = Scale9Key::new(scale9, space).with_ratio(ratio);
         self.0.scale9_cache.get_or_register(key, || {
             let shared = self.0.shared.get();
-            let library = context.library.library_for_movie(shared.movie.clone())?;
+            let library = context
+                .library
+                .library_for_movie(shared.movie.clone(), context.gc_context)?;
             let frame = shared.get_frame(ratio);
             let distilled: DistilledShape = (&frame.shape).into();
             Some(context.renderer.register_shape(
                 scale9.apply(distilled, space),
-                &MovieLibrarySource { library },
+                &MovieLibrarySource { library: &library },
             ))
         })
     }
@@ -71,14 +75,15 @@ impl<'gc> MorphShape<'gc> {
     pub fn from_swf_tag(
         gc_context: &Mutation<'gc>,
         tag: swf::DefineMorphShape,
-        movie: Arc<SwfMovie>,
+        library: MovieLibraryRef<'gc>,
     ) -> Self {
-        let shared = MorphShapeShared::from_swf_tag(&tag, movie);
+        let shared = MorphShapeShared::from_swf_tag(&tag, library.movie());
         MorphShape(Gc::new(
             gc_context,
             MorphShapeData {
                 base: Default::default(),
                 shared: Lock::new(Gc::new(gc_context, shared)),
+                library: Lock::new(library),
                 object: Lock::new(None),
                 scale9_cache: Scale9Cache::default(),
             },
@@ -100,13 +105,14 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
     }
 
     fn replace_with(self, context: &mut UpdateContext<'gc>, id: CharacterId) {
-        if let Some(new_morph_shape) = context
+        let new_morph_shape = context
             .library
-            .library_for_movie_mut(self.movie())
-            .get_morph_shape(id)
-        {
-            unlock!(Gc::write(context.gc(), self.0), MorphShapeData, shared)
-                .set(new_morph_shape.0.shared.get());
+            .library_for_movie_mut(self.movie(), context.gc_context)
+            .get_morph_shape(id);
+        if let Some(new_morph_shape) = new_morph_shape {
+            let write = Gc::write(context.gc(), self.0);
+            unlock!(write, MorphShapeData, shared).set(new_morph_shape.0.shared.get());
+            unlock!(write, MorphShapeData, library).set(new_morph_shape.0.library.get());
             // The key carries no character identity, so the new art could pass for the old.
             self.0.scale9_cache.clear();
         } else {
@@ -298,11 +304,12 @@ impl MorphShapeShared {
         } else {
             let library = context
                 .library
-                .library_for_movie(self.movie.clone())
+                .library_for_movie(self.movie.clone(), context.gc_context)
                 .unwrap();
-            let handle = context
-                .renderer
-                .register_shape((&frame.shape).into(), &MovieLibrarySource { library });
+            let handle = context.renderer.register_shape(
+                (&frame.shape).into(),
+                &MovieLibrarySource { library: &library },
+            );
             frame.shape_handle = Some(handle.clone());
             handle
         }

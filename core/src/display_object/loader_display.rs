@@ -11,6 +11,7 @@ use crate::prelude::*;
 
 use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::InteractiveObjectBase;
+use crate::library::MovieLibraryRef;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use core::fmt;
@@ -43,10 +44,16 @@ pub struct LoaderDisplayData<'gc> {
     container: RefLock<ChildContainer<'gc>>,
     avm2_object: Lock<Option<Avm2StageObject<'gc>>>,
     movie: Arc<SwfMovie>,
+    /// The library of `movie`, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
 }
 
 impl<'gc> LoaderDisplay<'gc> {
     pub fn empty(activation: &mut Activation<'_, 'gc>, movie: Arc<SwfMovie>) -> Self {
+        let library = activation
+            .context
+            .library
+            .library_ref(movie.clone(), activation.context.gc_context);
         let obj = LoaderDisplay(Gc::new(
             activation.gc(),
             LoaderDisplayData {
@@ -54,6 +61,7 @@ impl<'gc> LoaderDisplay<'gc> {
                 container: RefLock::new(ChildContainer::new(&movie)),
                 avm2_object: Lock::new(None),
                 movie,
+                library,
             },
         ));
 

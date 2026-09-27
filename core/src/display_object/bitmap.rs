@@ -9,6 +9,7 @@ use crate::avm2::{
 use crate::bitmap::bitmap_data::BitmapData;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{BoundsMode, DisplayObjectBase, DisplayObjectPtr, DisplayObjectWeak};
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
@@ -103,6 +104,9 @@ pub struct BitmapGraphicData<'gc> {
     base: DisplayObjectBase<'gc>,
     movie: Arc<SwfMovie>,
 
+    /// The library of `movie`, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
+
     /// The AVM2 side of this object.
     ///
     /// AVM1 code cannot directly reference `Bitmap`s, so this does not support
@@ -143,7 +147,7 @@ impl<'gc> Bitmap<'gc> {
         id: CharacterId,
         bitmap_data: BitmapData<'gc>,
         smoothing: bool,
-        movie: &Arc<SwfMovie>,
+        library: MovieLibraryRef<'gc>,
     ) -> Self {
         // NOTE: We do *not* solicit a handle from the `bitmap_data` at this
         // time due to mutable borrowing issues.
@@ -163,7 +167,8 @@ impl<'gc> Bitmap<'gc> {
                 pixel_snapping: Cell::new(PixelSnapping::Auto),
                 avm2_object: Lock::new(None),
                 avm2_bitmap_class: Lock::new(BitmapClass::NoSubclass),
-                movie: movie.clone(),
+                movie: library.movie(),
+                library,
             },
         ));
 
@@ -177,7 +182,7 @@ impl<'gc> Bitmap<'gc> {
         mc: &Mutation<'gc>,
         id: CharacterId,
         bitmap: ruffle_render::bitmap::Bitmap,
-        movie: Arc<SwfMovie>,
+        library: MovieLibraryRef<'gc>,
     ) -> Self {
         let width = bitmap.width();
         let height = bitmap.height();
@@ -195,7 +200,7 @@ impl<'gc> Bitmap<'gc> {
         let bitmap_data = BitmapData::new_with_pixels(mc, width, height, transparency, pixels);
 
         let smoothing = true;
-        Self::new_with_bitmap_data(mc, id, bitmap_data, smoothing, &movie)
+        Self::new_with_bitmap_data(mc, id, bitmap_data, smoothing, library)
     }
 
     pub fn instantiate(self, mc: &Mutation<'gc>) -> Self {

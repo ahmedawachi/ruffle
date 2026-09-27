@@ -17,6 +17,7 @@ use crate::events::{ClipEvent, ClipEventResult};
 use crate::frame_lifecycle::{
     broadcast_frame_constructed, broadcast_frame_exited, catchup_display_object_to_frame,
 };
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::vminterface::Instantiator;
@@ -49,6 +50,9 @@ pub struct Avm2ButtonData<'gc> {
     base: InteractiveObjectBase<'gc>,
 
     shared: Gc<'gc, ButtonShared>,
+
+    /// The library of the button's movie, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
 
     /// The display object tree to render when the button is in the UP state.
     up_state: Lock<Option<DisplayObject<'gc>>>,
@@ -106,10 +110,14 @@ impl<'gc> Avm2Button<'gc> {
         context: &mut UpdateContext<'gc>,
         construct_blank_states: bool,
     ) -> Self {
+        let library = context
+            .library
+            .library_ref(source_movie.movie.clone(), context.gc_context);
         Avm2Button(Gc::new(
             context.gc(),
             Avm2ButtonData {
                 base: Default::default(),
+                library,
                 shared: Gc::new(
                     context.gc(),
                     ButtonShared {
@@ -198,7 +206,6 @@ impl<'gc> Avm2Button<'gc> {
         context: &mut UpdateContext<'gc>,
         swf_state: swf::ButtonState,
     ) -> (DisplayObject<'gc>, bool) {
-        let movie = self.movie();
         let sprite_class = context.avm2.classes().sprite;
 
         let mut children = Vec::new();
@@ -206,11 +213,11 @@ impl<'gc> Avm2Button<'gc> {
 
         for record in shared.cell.borrow().records.iter() {
             if record.states.contains(swf_state) {
-                match context
+                let child = context
                     .library
-                    .library_for_movie_mut(movie.clone())
-                    .instantiate_by_id(record.id, context.gc_context)
-                {
+                    .get(self.0.library)
+                    .instantiate_by_id(record.id, context.gc_context);
+                match child {
                     Some(child) => {
                         child.set_matrix(record.matrix.into());
                         child.set_depth(record.depth.into());
@@ -250,7 +257,7 @@ impl<'gc> Avm2Button<'gc> {
 
             (child, false)
         } else {
-            let state_sprite = MovieClip::new(movie, context.gc());
+            let state_sprite = MovieClip::new(self.0.library, context.gc());
             state_sprite.set_avm2_class(context.gc(), Some(sprite_class));
             state_sprite.set_parent(context, Some(self.into()));
             catchup_display_object_to_frame(context, state_sprite.into());

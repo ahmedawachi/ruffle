@@ -47,8 +47,14 @@ impl<'gc> LayoutContext<'gc> for UpdateContext<'gc> {
         is_italic: bool,
         movie: Option<Arc<SwfMovie>>,
     ) -> Option<Font<'gc>> {
-        self.library
-            .get_embedded_font_by_name(name, font_type, is_bold, is_italic, movie)
+        self.library.get_embedded_font_by_name(
+            name,
+            font_type,
+            is_bold,
+            is_italic,
+            movie,
+            self.gc_context,
+        )
     }
 
     fn default_font(
@@ -98,8 +104,14 @@ impl<'gc> LayoutContext<'gc> for RenderContext<'_, 'gc> {
         is_italic: bool,
         movie: Option<Arc<SwfMovie>>,
     ) -> Option<Font<'gc>> {
-        self.library
-            .get_embedded_font_by_name(name, font_type, is_bold, is_italic, movie)
+        self.library.get_embedded_font_by_name(
+            name,
+            font_type,
+            is_bold,
+            is_italic,
+            movie,
+            self.gc_context,
+        )
     }
 
     fn default_font(

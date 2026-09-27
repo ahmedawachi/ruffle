@@ -99,16 +99,14 @@ pub fn init<'gc>(
     // We set the underlying BitmapData instance - we start out with a dummy BitmapData,
     // which makes custom classes see a disposed BitmapData before they call super()
     let name = this.instance_class().name();
-    let character = activation
-        .context
-        .library
-        .avm2_class_registry()
-        .class_symbol(this.instance_class())
-        .and_then(|(movie, chara_id)| {
+    let character = this
+        .instance_class()
+        .symbol_class()
+        .and_then(|(library, chara_id)| {
             activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
+                .get(library)
                 .character_by_id(chara_id)
         });
 

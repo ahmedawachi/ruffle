@@ -11,6 +11,7 @@ use crate::display_object::{
 };
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::fte::TextLineValidity;
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
@@ -44,6 +45,8 @@ pub struct TextLineData<'gc> {
     fallback: EditText<'gc>,
     #[collect(require_static)]
     movie: Arc<SwfMovie>,
+    /// The library of `movie`, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
 
     validity: Lock<TextLineValidity<'gc>>,
 
@@ -68,6 +71,9 @@ impl<'gc> TextLine<'gc> {
         movie: Arc<SwfMovie>,
         fallback: EditText<'gc>,
     ) -> Self {
+        let library = context
+            .library
+            .library_ref(movie.clone(), context.gc_context);
         TextLine(Gc::new(
             context.gc(),
             TextLineData {
@@ -75,6 +81,7 @@ impl<'gc> TextLine<'gc> {
                 avm2_object: Lock::new(None),
                 fallback,
                 movie,
+                library,
                 validity: Lock::new(TextLineValidity::Valid),
                 text_block: Lock::new(None),
                 hide_block_from_script: Cell::new(false),

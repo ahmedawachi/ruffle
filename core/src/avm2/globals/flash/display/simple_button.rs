@@ -39,16 +39,11 @@ pub fn simple_button_allocator<'gc>(
             return Ok(obj.into());
         }
 
-        if let Some((movie, symbol)) = activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(class)
-        {
+        if let Some((library, symbol)) = class.symbol_class() {
             let child = activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
+                .get(library)
                 .instantiate_by_id(symbol, activation.context.gc_context);
 
             if let Some(child) = child {

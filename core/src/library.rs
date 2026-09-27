@@ -1,5 +1,5 @@
 use crate::avm1::{PropertyMap as Avm1PropertyMap, PropertyMap};
-use crate::avm2::{Class as Avm2Class, Domain as Avm2Domain};
+use crate::avm2::Domain as Avm2Domain;
 use crate::backend::audio::SoundHandle;
 use crate::character::Character;
 
@@ -8,8 +8,11 @@ use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
 use crate::prelude::*;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
+use core::fmt;
+use gc_arena::barrier::unlock;
 use gc_arena::collect::Trace;
-use gc_arena::{Collect, Mutation};
+use gc_arena::lock::RefLock;
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::utils::remove_invalid_jpeg_data;
@@ -18,101 +21,73 @@ use ruffle_wstr::{WStr, WString};
 use crate::backend::ui::{FontDefinition, UiBackend};
 use crate::font::DefaultFont;
 use fnv::{FnvHashMap, FnvHashSet};
+use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
-use weak_table::{PtrWeakKeyHashMap, WeakValueHashMap, traits::WeakElement};
+use std::sync::Arc;
 
-#[derive(Clone)]
-struct MovieSymbol(Arc<SwfMovie>, CharacterId);
+/// A strong reference to the symbol library of a single movie.
+///
+/// Movie libraries are garbage collected: `Library` only keeps weak references
+/// to them. The library of a movie, with its characters and the render and
+/// memory resources they hold, lives exactly as long as something that can
+/// still use it holds one of these: the display objects of the movie, the AVM2
+/// code it defined, the classes linked to its symbols, the `LoaderInfo` of a
+/// loaded movie and, for the root movie, the player.
+///
+/// A `MovieLibraryRef` only keeps the library alive. It is read and written
+/// through `Library`, which ties every borrow of it to a borrow of `Library`,
+/// so a library can never be borrowed mutably twice.
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
+pub struct MovieLibraryRef<'gc>(Gc<'gc, MovieLibraryCell<'gc>>);
 
-#[derive(Clone)]
-struct WeakMovieSymbol(Weak<SwfMovie>, CharacterId);
+#[derive(Collect)]
+#[collect(no_drop)]
+struct MovieLibraryCell<'gc> {
+    #[collect(require_static)]
+    movie: Arc<SwfMovie>,
+    library: RefLock<MovieLibrary<'gc>>,
+}
 
-impl WeakElement for WeakMovieSymbol {
-    type Strong = MovieSymbol;
-
-    fn new(view: &Self::Strong) -> Self {
-        Self(Arc::downgrade(&view.0), view.1)
-    }
-
-    fn view(&self) -> Option<Self::Strong> {
-        if let Some(strong) = self.0.upgrade() {
-            Some(MovieSymbol(strong, self.1))
-        } else {
-            None
-        }
+impl fmt::Debug for MovieLibraryRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MovieLibraryRef")
+            .field("ptr", &Gc::as_ptr(self.0))
+            .field("url", &self.0.movie.url())
+            .finish()
     }
 }
 
-/// The mappings between class objects and library characters defined by
-/// `SymbolClass`.
-pub struct Avm2ClassRegistry<'gc> {
-    /// A list of AVM2 class objects and the character IDs they are expected to
-    /// instantiate.
-    class_map: WeakValueHashMap<Avm2Class<'gc>, WeakMovieSymbol>,
-}
-
-unsafe impl<'gc> Collect<'gc> for Avm2ClassRegistry<'gc> {
-    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (k, _) in self.class_map.iter() {
-            cc.trace(k);
-        }
-    }
-}
-
-impl Default for Avm2ClassRegistry<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'gc> Avm2ClassRegistry<'gc> {
-    pub fn new() -> Self {
-        Self {
-            class_map: WeakValueHashMap::new(),
-        }
+impl<'gc> MovieLibraryRef<'gc> {
+    fn new(movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> Self {
+        let this = Self(Gc::new(
+            mc,
+            MovieLibraryCell {
+                movie: movie.clone(),
+                library: RefLock::new(MovieLibrary::new(movie)),
+            },
+        ));
+        // `Bitmap`s instantiated from the library hold it, so it needs to know itself.
+        this.borrow_mut(mc).this = Some(this);
+        this
     }
 
-    /// Retrieve the library symbol for a given AVM2 class object.
-    ///
-    /// A value of `None` indicates that this AVM2 class is not associated with
-    /// a library symbol.
-    pub fn class_symbol(&self, class_def: Avm2Class<'gc>) -> Option<(Arc<SwfMovie>, CharacterId)> {
-        match self.class_map.get(&class_def) {
-            Some(MovieSymbol(movie, symbol)) => Some((movie, symbol)),
-            None => None,
-        }
+    /// The movie that this library belongs to.
+    pub fn movie(self) -> Arc<SwfMovie> {
+        self.0.movie.clone()
     }
 
-    /// Associate an AVM2 class definition with a given library symbol.
-    pub fn set_class_symbol(
-        &mut self,
-        class_def: Avm2Class<'gc>,
-        movie: Arc<SwfMovie>,
-        symbol: CharacterId,
-    ) {
-        if let Some(old) = self.class_map.get(&class_def) {
-            if Arc::ptr_eq(&movie, &old.0) && symbol != old.1 {
-                // Flash player actually allows using the same class in multiple SymbolClass
-                // entries in the same swf, with *different* symbol ids. Whichever one
-                // is processed first will *win*, and the second one will be ignored.
-                // We still log a warning, since we wouldn't expect this to happen outside
-                // of deliberately crafted SWFs.
-                tracing::warn!(
-                    "Tried to overwrite class {:?} id={:?} with symbol id={:?} from same movie",
-                    class_def,
-                    old.1,
-                    symbol,
-                );
-            }
-            // If we're trying to overwrite the class with a symbol from a *different* SwfMovie,
-            // then just ignore it. This handles the case where a Loader has a class that shadows
-            // a class in the main swf (possibly with a different ApplicationDomain). This will
-            // result in the original class from the parent being used, even when the child swf
-            // instantiates the clip on the timeline.
-            return;
-        }
-        self.class_map.insert(class_def, MovieSymbol(movie, symbol));
+    /// Returns true if both references point to the same library.
+    pub fn ptr_eq(a: Self, b: Self) -> bool {
+        Gc::ptr_eq(a.0, b.0)
+    }
+
+    fn borrow(self) -> Ref<'gc, MovieLibrary<'gc>> {
+        Gc::as_ref(self.0).library.borrow()
+    }
+
+    fn borrow_mut(self, mc: &Mutation<'gc>) -> RefMut<'gc, MovieLibrary<'gc>> {
+        unlock!(Gc::write(mc, self.0), MovieLibraryCell, library).borrow_mut()
     }
 }
 
@@ -127,10 +102,12 @@ pub struct MovieLibrary<'gc> {
     jpeg_tables: Option<Vec<u8>>,
     fonts: FontMap<'gc>,
     avm2_domain: Option<Avm2Domain<'gc>>,
+    /// The reference that owns this library; set as soon as it is created.
+    this: Option<MovieLibraryRef<'gc>>,
 }
 
 impl<'gc> MovieLibrary<'gc> {
-    pub fn new(swf: Arc<SwfMovie>) -> Self {
+    fn new(swf: Arc<SwfMovie>) -> Self {
         Self {
             swf,
             characters: HashMap::new(),
@@ -139,7 +116,14 @@ impl<'gc> MovieLibrary<'gc> {
             jpeg_tables: None,
             fonts: Default::default(),
             avm2_domain: None,
+            this: None,
         }
+    }
+
+    /// A strong reference to this library.
+    fn library_ref(&self) -> MovieLibraryRef<'gc> {
+        self.this
+            .expect("a movie library is always owned by a MovieLibraryRef")
     }
 
     /// Registers a character; returns `true` if successful, or `false` if a character with
@@ -264,7 +248,7 @@ impl<'gc> MovieLibrary<'gc> {
             Character::Bitmap(bitmap) => {
                 let avm2_class = bitmap.avm2_class();
                 let bitmap = bitmap.compressed().decode().unwrap();
-                let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
+                let bitmap = Bitmap::new(mc, id, bitmap, self.library_ref());
                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                 Some(bitmap.instantiate(mc).into())
             }
@@ -400,34 +384,48 @@ impl ruffle_render::bitmap::BitmapSource for MovieLibrarySource<'_, '_> {
     }
 }
 
-struct MovieLibraries<'gc>(PtrWeakKeyHashMap<Weak<SwfMovie>, MovieLibrary<'gc>>);
+/// Weak references to the libraries of all movies, keyed by the address of their movie.
+///
+/// A library holds its movie until it is dropped, so while an entry has not been
+/// dropped, no other movie can have its address. Entries of dropped libraries are
+/// pruned before inserting.
+struct MovieLibraries<'gc>(FnvHashMap<*const SwfMovie, GcWeak<'gc, MovieLibraryCell<'gc>>>);
 
 unsafe impl<'gc> Collect<'gc> for MovieLibraries<'gc> {
     #[inline]
     fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (_, val) in self.0.iter() {
-            cc.trace(val);
+        for library in self.0.values() {
+            cc.trace(library);
         }
     }
 }
 
 impl<'gc> MovieLibraries<'gc> {
     fn new() -> Self {
-        Self(PtrWeakKeyHashMap::new())
+        Self(FnvHashMap::default())
     }
 
-    fn get(&self, key: &Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
-        self.0.get(key)
+    fn get(&self, movie: &Arc<SwfMovie>, mc: &Mutation<'gc>) -> Option<MovieLibraryRef<'gc>> {
+        let library = MovieLibraryRef(self.0.get(&Arc::as_ptr(movie))?.upgrade(mc)?);
+        debug_assert!(Arc::ptr_eq(&library.0.movie, movie));
+        Some(library)
     }
 
-    fn get_or_insert_mut(&mut self, movie: Arc<SwfMovie>) -> &mut MovieLibrary<'gc> {
+    fn get_or_insert(&mut self, movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> MovieLibraryRef<'gc> {
+        if let Some(library) = self.get(&movie, mc) {
+            return library;
+        }
+        self.0.retain(|_, library| !library.is_dropped());
+        let library = MovieLibraryRef::new(movie, mc);
         self.0
-            .entry(movie.clone())
-            .or_insert_with(|| MovieLibrary::new(movie))
+            .insert(Arc::as_ptr(&library.0.movie), Gc::downgrade(library.0));
+        library
     }
 
-    fn known_movies(&self) -> impl Iterator<Item = Arc<SwfMovie>> {
-        self.0.keys()
+    fn live(&self, mc: &Mutation<'gc>) -> impl Iterator<Item = MovieLibraryRef<'gc>> {
+        self.0
+            .values()
+            .filter_map(move |library| library.upgrade(mc).map(MovieLibraryRef))
     }
 }
 
@@ -437,6 +435,10 @@ impl<'gc> MovieLibraries<'gc> {
 pub struct Library<'gc> {
     /// All the movie libraries.
     movie_libraries: MovieLibraries<'gc>,
+
+    /// The library of the root movie, which is looked up through
+    /// `UpdateContext::root_swf` even when no display object of the root movie is left.
+    root_library: Option<MovieLibraryRef<'gc>>,
 
     /// A cache of seen device fonts.
     // TODO: Descriptors shouldn't be stored in fonts. Fonts should be a list that we iterate and ask "do you match". A font can have zero or many names.
@@ -458,36 +460,86 @@ pub struct Library<'gc> {
 
     /// The cached list of implementations per default font.
     default_font_cache: FnvHashMap<(DefaultFont, bool, bool), Vec<Font<'gc>>>,
-
-    /// A list of the symbols associated with specific AVM2 constructor
-    /// prototypes.
-    avm2_class_registry: Avm2ClassRegistry<'gc>,
 }
 
 impl<'gc> Library<'gc> {
     pub fn empty() -> Self {
         Self {
             movie_libraries: MovieLibraries::new(),
+            root_library: None,
             device_fonts: Default::default(),
             global_fonts: Default::default(),
             font_lookup_cache: Default::default(),
             font_sort_cache: Default::default(),
             default_font_names: Default::default(),
             default_font_cache: Default::default(),
-            avm2_class_registry: Default::default(),
         }
     }
 
-    pub fn library_for_movie(&self, movie: Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
-        self.movie_libraries.get(&movie)
+    /// Returns the library of the given movie, if it has one.
+    ///
+    /// A library is only found while something holds a `MovieLibraryRef` to it (see
+    /// `library_ref`): everything that uses the library of a movie must keep it alive.
+    pub fn library_for_movie(
+        &self,
+        movie: Arc<SwfMovie>,
+        mc: &Mutation<'gc>,
+    ) -> Option<Ref<'_, MovieLibrary<'gc>>> {
+        self.movie_libraries
+            .get(&movie, mc)
+            .map(MovieLibraryRef::borrow)
     }
 
-    pub fn library_for_movie_mut(&mut self, movie: Arc<SwfMovie>) -> &mut MovieLibrary<'gc> {
-        self.movie_libraries.get_or_insert_mut(movie)
+    /// Returns the library of the given movie, creating an empty one if it has none.
+    pub fn library_for_movie_mut(
+        &mut self,
+        movie: Arc<SwfMovie>,
+        mc: &Mutation<'gc>,
+    ) -> RefMut<'_, MovieLibrary<'gc>> {
+        self.movie_libraries.get_or_insert(movie, mc).borrow_mut(mc)
     }
 
-    pub fn known_movies(&self) -> impl Iterator<Item = Arc<SwfMovie>> {
-        self.movie_libraries.known_movies()
+    /// Returns a strong reference to the library of the given movie, creating
+    /// an empty one if it has none.
+    ///
+    /// Everything that can use the library of a movie later on (display objects,
+    /// AVM2 code, class links, loader infos) holds one of these, which keeps the
+    /// library alive.
+    pub fn library_ref(
+        &mut self,
+        movie: Arc<SwfMovie>,
+        mc: &Mutation<'gc>,
+    ) -> MovieLibraryRef<'gc> {
+        self.movie_libraries.get_or_insert(movie, mc)
+    }
+
+    /// Borrows a library that is kept alive by the given reference.
+    pub fn get(&self, library: MovieLibraryRef<'gc>) -> Ref<'_, MovieLibrary<'gc>> {
+        library.borrow()
+    }
+
+    /// Mutably borrows a library that is kept alive by the given reference.
+    pub fn get_mut(
+        &mut self,
+        library: MovieLibraryRef<'gc>,
+        mc: &Mutation<'gc>,
+    ) -> RefMut<'_, MovieLibrary<'gc>> {
+        library.borrow_mut(mc)
+    }
+
+    /// Makes the library of the given movie live as long as it is the root movie:
+    /// the root movie is looked up through `UpdateContext::root_swf` even when none
+    /// of its display objects are left.
+    pub fn set_root_movie(&mut self, movie: Arc<SwfMovie>, mc: &Mutation<'gc>) {
+        self.root_library = Some(self.library_ref(movie, mc));
+    }
+
+    /// The movies that currently have a library.
+    pub fn known_movies(&self, mc: &Mutation<'gc>) -> Vec<Arc<SwfMovie>> {
+        self.movie_libraries
+            .live(mc)
+            .map(MovieLibraryRef::movie)
+            .collect()
     }
 
     /// Returns the default Font implementations behind the built in names (ie `_sans`)
@@ -716,13 +768,14 @@ impl<'gc> Library<'gc> {
         is_bold: bool,
         is_italic: bool,
         movie: Option<Arc<SwfMovie>>,
+        mc: &Mutation<'gc>,
     ) -> Option<Font<'gc>> {
         let query = FontQuery::new(font_type, name.to_owned(), is_bold, is_italic);
         if let Some(font) = self.global_fonts.find(&query) {
             return Some(font);
         }
         if let Some(movie) = movie
-            && let Some(library) = self.library_for_movie(movie)
+            && let Some(library) = self.library_for_movie(movie, mc)
         {
             if let Some((_, font)) = library.character_by_export_name(&WString::from_utf8(name)) {
                 // Exporting a font seems to override font lookup completely.
@@ -745,16 +798,6 @@ impl<'gc> Library<'gc> {
 
     pub fn register_global_font(&mut self, font: Font<'gc>) {
         self.global_fonts.register(font);
-    }
-
-    /// Get the AVM2 class registry.
-    pub fn avm2_class_registry(&self) -> &Avm2ClassRegistry<'gc> {
-        &self.avm2_class_registry
-    }
-
-    /// Mutate the AVM2 class registry.
-    pub fn avm2_class_registry_mut(&mut self) -> &mut Avm2ClassRegistry<'gc> {
-        &mut self.avm2_class_registry
     }
 
     /// Evicts cached font resources that haven't been used, across all device

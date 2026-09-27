@@ -2975,8 +2975,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Some(level) = self.get_level(level_id) {
             level
         } else {
-            let level: DisplayObject<'_> =
-                MovieClip::new(self.base_clip().movie(), self.gc()).into();
+            let library = self
+                .context
+                .library
+                .library_ref(self.base_clip().movie(), self.context.gc_context);
+            let level: DisplayObject<'_> = MovieClip::new(library, self.gc()).into();
 
             level.set_depth(level_id);
             level.set_default_root_name(self.context);

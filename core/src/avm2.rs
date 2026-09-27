@@ -470,8 +470,11 @@ impl<'gc> Avm2<'gc> {
 
         let class = class_object.inner_class_definition();
 
-        let library = activation.context.library.library_for_movie_mut(movie);
-        let character = library.character_by_id(id);
+        let character = activation
+            .context
+            .library
+            .library_for_movie_mut(movie, activation.context.gc_context)
+            .character_by_id(id);
 
         if let Some(character) = character {
             if matches!(
@@ -535,7 +538,12 @@ impl<'gc> Avm2<'gc> {
         }
 
         let num_scripts = abc.scripts.len();
-        let tunit = TranslationUnit::from_abc(abc, domain, name, movie, activation.gc());
+        let library = activation
+            .context
+            .library
+            .library_ref(movie.clone(), activation.context.gc_context);
+        let tunit =
+            TranslationUnit::from_abc(abc, domain, name, movie, Some(library), activation.gc());
         tunit.load_classes(&mut activation)?;
         for i in 0..num_scripts {
             tunit.load_script(i as u32, &mut activation)?;
@@ -565,7 +573,7 @@ impl<'gc> Avm2<'gc> {
         // domain using `activation.domain()`
         activation.set_outer(ScopeChain::new(domain));
 
-        let tunit = TranslationUnit::from_abc(abc, domain, None, movie, activation.gc());
+        let tunit = TranslationUnit::from_abc(abc, domain, None, movie, None, activation.gc());
 
         globals::init_early_classes(&mut activation, tunit).expect("Early classes should load");
 

@@ -27,42 +27,37 @@ pub fn bitmap_allocator<'gc>(
     while let Some(class) = class_def {
         if class == bitmap_cls {
             let bitmap_data = BitmapData::dummy(activation.gc());
-            let display_object = Bitmap::new_with_bitmap_data(
-                activation.gc(),
-                0,
-                bitmap_data,
-                false,
-                &activation.caller_movie_or_root(),
-            )
-            .into();
+            let library = activation.context.library.library_ref(
+                activation.caller_movie_or_root(),
+                activation.context.gc_context,
+            );
+            let display_object =
+                Bitmap::new_with_bitmap_data(activation.gc(), 0, bitmap_data, false, library)
+                    .into();
             return Ok(
                 initialize_for_allocator(activation.context, display_object, orig_class).into(),
             );
         }
 
-        if let Some((movie, symbol)) = activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(class)
-            && let Some(Character::Bitmap(bitmap)) = activation
+        let character = class.symbol_class().and_then(|(library, symbol)| {
+            activation
                 .context
                 .library
-                .library_for_movie_mut(movie)
+                .get(library)
                 .character_by_id(symbol)
-        {
+        });
+        if let Some(Character::Bitmap(bitmap)) = character {
             let new_bitmap_data = fill_bitmap_data_from_symbol(activation, bitmap.compressed());
             let bitmap_data_obj =
                 BitmapDataObject::from_bitmap_data(activation.context, new_bitmap_data);
             new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
 
-            let child = Bitmap::new_with_bitmap_data(
-                activation.gc(),
-                0,
-                new_bitmap_data,
-                false,
-                &activation.caller_movie_or_root(),
+            let library = activation.context.library.library_ref(
+                activation.caller_movie_or_root(),
+                activation.context.gc_context,
             );
+            let child =
+                Bitmap::new_with_bitmap_data(activation.gc(), 0, new_bitmap_data, false, library);
 
             return Ok(
                 initialize_for_allocator(activation.context, child.into(), orig_class).into(),

@@ -26,6 +26,7 @@ use crate::html::{
     FormatSpans, Layout, LayoutBox, LayoutContent, LayoutContext, LayoutLine, LayoutMetrics,
     Position, TextFormat,
 };
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::string::{AvmString, SwfStrExt as _, WStr, WString, utils as string_utils};
 use crate::tag_utils::SwfMovie;
@@ -91,6 +92,9 @@ pub struct EditTextData<'gc> {
 
     /// Data shared among all instances of this `EditText`.
     shared: Gc<'gc, EditTextShared>,
+
+    /// The library of the text field's movie, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
 
     /// The AVM1 object handle
     object: Lock<Option<AvmObject<'gc>>>,
@@ -264,6 +268,9 @@ impl<'gc> EditText<'gc> {
         swf_tag: swf::EditText,
     ) -> Self {
         let default_format = TextFormat::from_swf_tag(swf_tag.clone(), swf_movie.clone(), context);
+        let library = context
+            .library
+            .library_ref(swf_movie.clone(), context.gc_context);
         let encoding = swf_movie.encoding();
         let text = swf_tag.initial_text().unwrap_or_default().decode(encoding);
 
@@ -328,6 +335,7 @@ impl<'gc> EditText<'gc> {
                             .map(|s| s.decode(encoding).into_owned()),
                     },
                 ),
+                library,
                 flags: Cell::new(flags),
                 background_color: Cell::new(Color::WHITE),
                 border_color: Cell::new(Color::BLACK),

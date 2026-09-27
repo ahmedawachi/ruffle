@@ -7,6 +7,7 @@ use crate::avm1::{
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{Avm1TextFieldBinding, BoundsMode, DisplayObjectBase, RenderOptions};
+use crate::library::MovieLibraryRef;
 use crate::prelude::*;
 use crate::streams::NetStream;
 use crate::tag_utils::{SwfMovie, SwfSlice};
@@ -73,6 +74,9 @@ pub struct VideoData<'gc> {
 
     /// The movie whose tagstream or code created the Video object.
     movie: Arc<SwfMovie>,
+
+    /// The library of `movie`, kept alive by this instance.
+    library: MovieLibraryRef<'gc>,
     /// The last decoded frame in the video stream.
     ///
     /// NOTE: This is only used for SWF-source video streams.
@@ -131,7 +135,7 @@ pub struct SwfVideoSource {
 impl<'gc> Video<'gc> {
     /// Construct a Video object that is tied to a SWF file's video stream.
     pub fn from_swf_tag(
-        movie: Arc<SwfMovie>,
+        library: MovieLibraryRef<'gc>,
         streamdef: DefineVideoStream,
         mc: &Mutation<'gc>,
     ) -> Self {
@@ -153,7 +157,8 @@ impl<'gc> Video<'gc> {
                 stream: Cell::new(VideoStream::Uninstantiated(0)),
                 object: Lock::new(None),
                 keyframes: RefCell::new(BTreeSet::new()),
-                movie,
+                movie: library.movie(),
+                library,
                 size: Cell::new(size),
                 decoded_frame: RefCell::new(None),
             },
@@ -162,7 +167,7 @@ impl<'gc> Video<'gc> {
 
     pub fn new(
         mc: &Mutation<'gc>,
-        movie: Arc<SwfMovie>,
+        library: MovieLibraryRef<'gc>,
         width: i32,
         height: i32,
         object: Option<AvmObject<'gc>>,
@@ -176,7 +181,8 @@ impl<'gc> Video<'gc> {
                 stream: Cell::new(VideoStream::Uninstantiated(0)),
                 object: Lock::new(object),
                 keyframes: RefCell::new(BTreeSet::new()),
-                movie,
+                movie: library.movie(),
+                library,
                 size: Cell::new((width, height)),
                 decoded_frame: RefCell::new(None),
             },

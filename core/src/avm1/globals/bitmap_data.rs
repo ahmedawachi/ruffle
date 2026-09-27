@@ -1325,7 +1325,7 @@ fn load_bitmap<'gc>(
     );
 
     let character = library
-        .library_for_movie(movie)
+        .library_for_movie(movie, activation.context.gc_context)
         .and_then(|l| l.character_by_export_name(&name));
 
     let Some((_id, Character::Bitmap(bitmap))) = character else {

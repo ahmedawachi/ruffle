@@ -6,11 +6,12 @@ use crate::avm2::object::{EventObject, Object, StageObject, TObject};
 use crate::avm2::{Avm2, Error};
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
+use crate::library::MovieLibraryRef;
 use crate::loader::ContentType;
 use crate::tag_utils::SwfMovie;
 use core::fmt;
 use gc_arena::barrier::unlock;
-use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
+use gc_arena::{Collect, Gc, GcWeak, Lock, Mutation, lock::RefLock};
 use ruffle_common::utils::HasPrefixField;
 use std::cell::{Cell, Ref};
 use std::sync::Arc;
@@ -78,6 +79,11 @@ pub struct LoaderInfoObjectData<'gc> {
     /// The loaded stream that this gets its info from.
     loaded_stream: RefLock<LoaderStream<'gc>>,
 
+    /// The library of the loaded movie, which holds its application domain.
+    ///
+    /// Loaded images have no display object of their movie that would keep it alive.
+    content_library: Lock<Option<MovieLibraryRef<'gc>>>,
+
     loader: Option<StageObject<'gc>>,
 
     /// Whether or not we've fired our 'init' event
@@ -120,6 +126,7 @@ impl<'gc> LoaderInfoObject<'gc> {
             LoaderInfoObjectData {
                 base,
                 loaded_stream: RefLock::new(LoaderStream::NotYetLoaded(movie, root_clip, is_stage)),
+                content_library: Lock::new(None),
                 loader,
                 init_event_fired: Cell::new(false),
                 complete_event_fired: Cell::new(false),
@@ -263,6 +270,12 @@ impl<'gc> LoaderInfoObject<'gc> {
         self.0.content_type.set(content_type);
     }
 
+    /// Keeps the library of the loaded movie alive for as long as this `LoaderInfo`
+    /// refers to it.
+    pub fn set_content_library(self, mc: &Mutation<'gc>, library: Option<MovieLibraryRef<'gc>>) {
+        unlock!(Gc::write(mc, self.0), LoaderInfoObjectData, content_library).set(library);
+    }
+
     pub fn unload(self, context: &mut UpdateContext<'gc>) {
         let mut loader = self
             .0
@@ -284,6 +297,7 @@ impl<'gc> LoaderInfoObject<'gc> {
         let empty_swf = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
         let loader_stream = LoaderStream::NotYetLoaded(empty_swf, None, false);
         self.set_loader_stream(loader_stream, context.gc());
+        self.set_content_library(context.gc(), None);
         self.set_errored(false);
         self.reset_init_and_complete_events();
 
