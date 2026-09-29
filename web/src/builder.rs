@@ -66,6 +66,7 @@ pub struct RuffleInstanceBuilder {
     pub(crate) url_rewrite_rules: Vec<(RegExp, String)>,
     pub(crate) scrolling_behavior: ScrollingBehavior,
     pub(crate) device_font_renderer: DeviceFontRenderer,
+    pub(crate) audio_context: Option<web_sys::AudioContext>,
 }
 
 impl Default for RuffleInstanceBuilder {
@@ -106,6 +107,7 @@ impl Default for RuffleInstanceBuilder {
             url_rewrite_rules: vec![],
             scrolling_behavior: ScrollingBehavior::Smart,
             device_font_renderer: DeviceFontRenderer::Embedded,
+            audio_context: None,
         }
     }
 }
@@ -299,6 +301,14 @@ impl RuffleInstanceBuilder {
     #[wasm_bindgen(js_name = "setVolume")]
     pub fn set_volume(&mut self, value: f32) {
         self.volume = value;
+    }
+
+    /// Use an AudioContext the page created ahead of time, instead of opening one in `build()`.
+    /// Creating a context blocks the main thread while the audio device opens (100-200 ms in
+    /// Chromium), so creating it while this module downloads takes that off the startup path.
+    #[wasm_bindgen(js_name = "setAudioContext")]
+    pub fn set_audio_context(&mut self, context: web_sys::AudioContext) {
+        self.audio_context = Some(context);
     }
 
     #[wasm_bindgen(js_name = "addFont")]
@@ -630,7 +640,7 @@ impl RuffleInstanceBuilder {
         &self,
         log_subscriber: Arc<Layered<WASMLayer, Registry>>,
     ) -> Box<dyn AudioBackend> {
-        if let Ok(audio) = audio::WebAudioBackend::new(log_subscriber) {
+        if let Ok(audio) = audio::WebAudioBackend::new(log_subscriber, self.audio_context.clone()) {
             Box::new(audio)
         } else {
             tracing::error!("Unable to create audio backend. No audio will be played.");

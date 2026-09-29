@@ -47,18 +47,27 @@ impl WebAudioBackend {
     /// is increased immediately. Must be in 0..1, and greater than `2 * NORMAL_PROGRESS_RANGE_MIN`.
     const NORMAL_PROGRESS_RANGE_MAX: f64 = 0.75;
 
-    pub fn new(log_subscriber: Arc<Layered<WASMLayer, Registry>>) -> Result<Self, JsError> {
-        // Pin the AudioContext to 44.1 kHz. SWF audio sources top out at 44.1 kHz, so
-        // there's no fidelity to gain from running our pipeline at the device rate, and
-        // running at the device rate caused stutter at startup on high-rate devices
-        // (e.g. 192/384 kHz cards) because each buffer expired faster than the JS event
-        // loop could refill it. Per Web Audio §1.2.1, the user agent MUST resample on
-        // output if the requested rate differs from the device rate.
-        // See: https://www.w3.org/TR/webaudio-1.1/#AudioContext-constructors
-        let opts = AudioContextOptions::new();
-        opts.set_sample_rate(44_100.0);
-
-        let context = AudioContext::new_with_context_options(&opts).into_js_result()?;
+    /// `context` is an AudioContext the page already created (with the same 44.1 kHz
+    /// option, see `RuffleInstanceBuilder::set_audio_context`); without one, it is created here.
+    pub fn new(
+        log_subscriber: Arc<Layered<WASMLayer, Registry>>,
+        context: Option<AudioContext>,
+    ) -> Result<Self, JsError> {
+        let context = match context {
+            Some(context) => context,
+            None => {
+                // Pin the AudioContext to 44.1 kHz. SWF audio sources top out at 44.1 kHz, so
+                // there's no fidelity to gain from running our pipeline at the device rate, and
+                // running at the device rate caused stutter at startup on high-rate devices
+                // (e.g. 192/384 kHz cards) because each buffer expired faster than the JS event
+                // loop could refill it. Per Web Audio §1.2.1, the user agent MUST resample on
+                // output if the requested rate differs from the device rate.
+                // See: https://www.w3.org/TR/webaudio-1.1/#AudioContext-constructors
+                let opts = AudioContextOptions::new();
+                opts.set_sample_rate(44_100.0);
+                AudioContext::new_with_context_options(&opts).into_js_result()?
+            }
+        };
         let sample_rate = context.sample_rate();
 
         let mut audio = Self {

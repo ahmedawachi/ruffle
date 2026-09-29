@@ -34,6 +34,20 @@ const DIMENSION_REGEX = /^\s*(\d+(\.\d+)?(%)?)/;
 
 let isAudioContextUnmuted = false;
 
+/**
+ * Create the AudioContext Ruffle plays through, with the options the wasm side would use
+ * (44.1 kHz, see web/src/audio.rs). Returns null where Web Audio is unavailable.
+ *
+ * @returns The new context, or null.
+ */
+function createAudioContext(): AudioContext | null {
+    try {
+        return new AudioContext({ sampleRate: 44100 });
+    } catch {
+        return null;
+    }
+}
+
 // Safari still requires prefixed fullscreen APIs, see:
 // https://developer.mozilla.org/en-US/docs/Web/API/Element/requestFullScreen
 // Safari uses alternate capitalization of FullScreen in some older APIs.
@@ -694,9 +708,22 @@ export class InnerPlayer {
             );
         }
 
+        // Open the audio device as soon as the wasm module starts downloading. Creating an
+        // AudioContext blocks the main thread for 100-200 ms; done here it overlaps the download
+        // instead of delaying the movie inside build(). Only the first load downloads (later ones
+        // reuse the module), and those keep creating the context in build().
+        let earlyAudioContext: AudioContext | null = null;
+        let triedEarlyAudioContext = false;
         const [builder, zipWriterClass] = await createRuffleBuilder(
-            this.onRuffleDownloadProgress.bind(this),
+            (bytesLoaded: number, bytesTotal: number) => {
+                if (!triedEarlyAudioContext) {
+                    triedEarlyAudioContext = true;
+                    earlyAudioContext = createAudioContext();
+                }
+                this.onRuffleDownloadProgress(bytesLoaded, bytesTotal);
+            },
         ).catch((e) => {
+            (earlyAudioContext as AudioContext | null)?.close();
             console.error(`Serious error loading Ruffle: ${e}`);
             const error = new LoadRuffleWasmError(e);
             this.panic(error);
@@ -705,6 +732,9 @@ export class InnerPlayer {
         this.newZipWriter = zipWriterClass;
         configureBuilder(builder, this.loadedConfig || {});
         builder.setVolume(this.volumeSettings.get_volume());
+        if (earlyAudioContext) {
+            builder.setAudioContext(earlyAudioContext);
+        }
 
         if (this.loadedConfig?.fontSources) {
             for (const url of this.loadedConfig.fontSources) {
