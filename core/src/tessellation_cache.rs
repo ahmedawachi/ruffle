@@ -83,6 +83,14 @@ impl TessellationCache {
         self.entries[self.len - 1] = Some((scale, handle));
     }
 
+    /// Returns the most recently used shape handle, if any.
+    pub(crate) fn most_recent(&self) -> Option<ShapeHandle> {
+        self.len
+            .checked_sub(1)
+            .and_then(|index| self.entries[index].as_ref())
+            .map(|(_, handle)| handle.clone())
+    }
+
     /// Returns the number of cached entries currently stored in the cache.
     pub(crate) fn len(&self) -> usize {
         self.len

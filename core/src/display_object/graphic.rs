@@ -64,20 +64,19 @@ impl<'gc> Graphic<'gc> {
         let library_ref = context
             .library
             .library_ref(movie.clone(), context.gc_context);
-        let library = context.library.get(library_ref);
+        // The shape is tessellated when it is first drawn, at the scale it is drawn at (see
+        // `get_or_retessellate_handle`). Tessellating it here as well, while the movie
+        // preloads, cost a second tessellation for every shape that is drawn and a wasted one
+        // for every shape that never is.
         let shared = GraphicShared {
             id: swf_shape.id,
             shape_bounds: swf_shape.shape_bounds,
             edge_bounds: swf_shape.edge_bounds,
-            render_handle: Some(context.renderer.register_shape(
-                (&swf_shape).into(),
-                &MovieLibrarySource { library: &library },
-            )),
+            has_art: true,
             shape: swf_shape,
             movie,
             scaled_handle: RefCell::new(TessellationCache::new()),
         };
-        drop(library);
 
         Graphic(Gc::new(
             context.gc(),
@@ -102,7 +101,7 @@ impl<'gc> Graphic<'gc> {
             id: 0,
             shape_bounds: Default::default(),
             edge_bounds: Default::default(),
-            render_handle: None,
+            has_art: false,
             shape: swf::Shape {
                 version: 32,
                 id: 0,
@@ -176,13 +175,12 @@ impl<'gc> Graphic<'gc> {
         })
     }
 
-    /// Returns the best shape handle for the current scale, retessellating if necessary.
+    /// Returns the best shape handle for the current scale, tessellating if necessary.
     fn get_or_retessellate_handle(
         self,
         context: &mut RenderContext,
-        base_handle: &ShapeHandle,
         current_scale: f32,
-    ) -> ShapeHandle {
+    ) -> Option<ShapeHandle> {
         // Since graphics are created from a shared shape, we may be able to reuse a
         // cached tessellation from another instance at a similar scale.
         let shared = self.0.shared.get();
@@ -191,7 +189,7 @@ impl<'gc> Graphic<'gc> {
             let mut cache = shared.scaled_handle.borrow_mut();
             if let Some(handle) = cache.find_near_and_touch(current_scale) {
                 // Found a cached handle at a similar scale; reuse it.
-                return handle;
+                return Some(handle);
             }
         }
 
@@ -217,9 +215,11 @@ impl<'gc> Graphic<'gc> {
                 cache.insert(current_scale, new_handle.clone());
             }
 
-            new_handle
+            Some(new_handle)
         } else {
-            base_handle.clone()
+            // The movie's library is gone, so the shape cannot be tessellated again;
+            // draw the most recent tessellation, if there is one.
+            shared.scaled_handle.borrow().most_recent()
         }
     }
 }
@@ -330,7 +330,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                 Some((scale9, space)) => drawing.render_scale9(context, &scale9, space),
                 None => drawing.render(context),
             }
-        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
+        } else if self.0.shared.get().has_art {
             let transform = context.transform_stack.transform();
 
             // Calculate the current scale from the transform, to determine if
@@ -356,9 +356,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                 }
             }
 
-            let handle = self.get_or_retessellate_handle(context, &base_handle, current_scale);
-
-            context.commands.render_shape(handle, transform)
+            if let Some(handle) = self.get_or_retessellate_handle(context, current_scale) {
+                context.commands.render_shape(handle, transform)
+            }
         }
     }
 
@@ -429,7 +429,8 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 struct GraphicShared {
     id: CharacterId,
     shape: swf::Shape,
-    render_handle: Option<ShapeHandle>,
+    /// False for an empty `Graphic`, which only ever shows its drawing.
+    has_art: bool,
     shape_bounds: Rectangle<Twips>,
     edge_bounds: Rectangle<Twips>,
     movie: Arc<SwfMovie>,
