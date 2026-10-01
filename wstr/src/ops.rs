@@ -118,6 +118,16 @@ pub fn str_eq(left: &WStr, right: &WStr) -> bool {
 }
 
 pub fn str_eq_ignore_case(left: &WStr, right: &WStr) -> bool {
+    // Case folding maps each code unit to exactly one code unit, so strings of different
+    // lengths never match.
+    if left.len() != right.len() {
+        return false;
+    }
+    if let (Units::Bytes(a), Units::Bytes(b)) = (left.units(), right.units()) {
+        return core::iter::zip(a, b).all(|(&a, &b)| {
+            a == b || utils::swf_to_lowercase(a.into()) == utils::swf_to_lowercase(b.into())
+        });
+    }
     let left = left.iter().map(utils::swf_to_lowercase);
     let right = right.iter().map(utils::swf_to_lowercase);
     left.eq(right)

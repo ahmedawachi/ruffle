@@ -84,11 +84,39 @@ pub fn utf16_code_unit_to_char(c: u16) -> char {
         .unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
+/// `swf_to_lowercase` of every Latin-1 code unit. Case-insensitive names (AVM1 property
+/// lookups hash and compare every unit this way) are almost always Latin-1, so this keeps
+/// the common case to one load instead of a branch and a binary search.
+static LATIN1_LOWERCASE: [u16; 256] = latin1_lowercase_table();
+
+const fn latin1_lowercase_table() -> [u16; 256] {
+    let mut table = [0u16; 256];
+    let mut c = 0;
+    while c < 256 {
+        table[c] = if c < 0x80 {
+            (c as u8).to_ascii_lowercase() as u16
+        } else {
+            c as u16
+        };
+        c += 1;
+    }
+    let mut i = 0;
+    while i < LOWERCASE_TABLE.len() {
+        let (upper, lower) = LOWERCASE_TABLE[i];
+        if upper >= 0x80 && upper < 0x100 {
+            table[upper as usize] = lower;
+        }
+        i += 1;
+    }
+    table
+}
+
 /// Maps a UCS2 code unit to its lowercase variant according to the Flash Player.
 /// Note that this mapping is different that Rust's `to_lowercase`.
+#[inline]
 pub fn swf_to_lowercase(c: u16) -> u16 {
-    if c < 0x80 {
-        return (c as u8).to_ascii_lowercase().into();
+    if c < 0x100 {
+        return LATIN1_LOWERCASE[c as usize];
     }
 
     match LOWERCASE_TABLE.binary_search_by(|&(key, _)| key.cmp(&c)) {

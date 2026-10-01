@@ -4,7 +4,7 @@
 //! the insertion order of properties, which is necessary for accurate
 //! enumeration order.
 
-use crate::string::{AvmString, WStr, utils as string_utils};
+use crate::string::{AvmString, Units, WStr, utils as string_utils};
 use fnv::FnvBuildHasher;
 use gc_arena::Collect;
 use indexmap::{Equivalent, IndexMap};
@@ -196,7 +196,15 @@ impl Hash for PropertyName<'_> {
 }
 
 fn swf_hash_string_ignore_case<H: Hasher>(s: &WStr, state: &mut H) {
-    s.iter()
-        .for_each(|c| string_utils::swf_to_lowercase(c).hash(state));
+    // The same values as hashing `swf_to_lowercase` of each code unit in turn, without
+    // checking the string's width on every unit.
+    match s.units() {
+        Units::Bytes(units) => units
+            .iter()
+            .for_each(|&c| string_utils::swf_to_lowercase(c.into()).hash(state)),
+        Units::Wide(units) => units
+            .iter()
+            .for_each(|&c| string_utils::swf_to_lowercase(c).hash(state)),
+    }
     state.write_u8(0xff);
 }

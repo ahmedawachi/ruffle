@@ -440,3 +440,38 @@ fn parse() {
     test_i32(b"-");
     test_i32(b"+");
 }
+
+/// The lowercase mapping before `LATIN1_LOWERCASE`, kept as the reference.
+fn reference_to_lowercase(c: u16) -> u16 {
+    if c < 0x80 {
+        return (c as u8).to_ascii_lowercase().into();
+    }
+    match crate::tables::LOWERCASE_TABLE.binary_search_by(|&(key, _)| key.cmp(&c)) {
+        Ok(i) => crate::tables::LOWERCASE_TABLE[i].1,
+        Err(_) => c,
+    }
+}
+
+#[test]
+fn swf_to_lowercase_matches_reference() {
+    for c in 0..=u16::MAX {
+        assert_eq!(utils::swf_to_lowercase(c), reference_to_lowercase(c), "{c:#06x}");
+    }
+}
+
+#[test]
+fn eq_ignore_case_across_widths() {
+    let pairs: &[(&WStr, &WStr, bool)] = &[
+        (bstr!(b"onPress"), bstr!(b"ONPRESS"), true),
+        (bstr!(b"onPress"), bstr!(b"onPres"), false),
+        (bstr!(b"\xC9t\xE9"), bstr!(b"\xE9T\xC9"), true),
+        (bstr!(b"onPress"), wstr!('O' 'N' 'P' 'R' 'E' 'S' 'S'), true),
+        (wstr!('\u{100}' 'a'), wstr!('\u{101}' 'A'), true),
+        (wstr!('\u{100}'), bstr!(b"a"), false),
+        (bstr!(b""), bstr!(b""), true),
+    ];
+    for &(a, b, eq) in pairs {
+        assert_eq!(a.eq_ignore_case(b), eq, "{a:?} vs {b:?}");
+        assert_eq!(b.eq_ignore_case(a), eq, "{b:?} vs {a:?}");
+    }
+}
